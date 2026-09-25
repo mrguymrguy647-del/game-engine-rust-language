@@ -41,6 +41,8 @@ const PRESETS: [(Key, usize); 6] = [
 ];
 /// Benchmark mode ignores the first frames, while everything warms up.
 const WARM_UP_SECONDS: f32 = 2.0;
+/// More objects than this would mostly just run out of memory.
+const MAX_OBJECTS: usize = 1_000_000;
 
 /// Settings read from the command line.
 struct Options {
@@ -52,12 +54,17 @@ struct Options {
 impl Options {
     /// Reads `--objects N`, `--seconds S` and `--renderer NAME` from the command line.
     fn from_args() -> Result<Options, String> {
+        Options::parse(std::env::args().skip(1)) // skip the program's own name
+    }
+
+    /// Reads the options from a list of words (separate from `from_args`, so
+    /// tests can try it without a real command line).
+    fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
         let mut options = Options {
             objects: 2_000,
             benchmark_seconds: None,
             renderer: Renderer::Auto,
         };
-        let mut args = std::env::args().skip(1); // skip the program's own name
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or(format!("{arg} needs a value"));
             match arg.as_str() {
@@ -65,9 +72,16 @@ impl Options {
                     options.objects = value()?
                         .parse()
                         .map_err(|_| "--objects needs a whole number")?;
+                    if options.objects > MAX_OBJECTS {
+                        return Err(format!("--objects can be at most {MAX_OBJECTS}"));
+                    }
                 }
                 "--seconds" => {
                     let seconds: f32 = value()?.parse().map_err(|_| "--seconds needs a number")?;
+                    // "NaN" and "inf" parse as numbers too, but would run forever.
+                    if !(seconds.is_finite() && seconds > 0.0) {
+                        return Err(String::from("--seconds must be more than 0"));
+                    }
                     options.benchmark_seconds = Some(seconds);
                 }
                 "--renderer" => {
@@ -300,4 +314,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Config::default()
     };
     duckforge::run(config, Stress::new(&options))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(line: &str) -> Result<Options, String> {
+        Options::parse(line.split_whitespace().map(String::from))
+    }
+
+    #[test]
+    fn good_options_are_read() {
+        let options = parse("--objects 5000 --seconds 10 --renderer cpu").unwrap();
+        assert_eq!(options.objects, 5000);
+        assert_eq!(options.benchmark_seconds, Some(10.0));
+        assert_eq!(options.renderer, Renderer::Cpu);
+        assert_eq!(parse("").unwrap().objects, 2_000);
+    }
+
+    #[test]
+    fn nonsense_options_are_refused() {
+        // A NaN or infinite benchmark would never finish; zero or less makes no sense.
+        for seconds in ["NaN", "inf", "0", "-5"] {
+            assert!(parse(&format!("--seconds {seconds}")).is_err(), "{seconds}");
+        }
+        assert!(parse("--objects 50000000").is_err()); // gigabytes of objects
+        assert!(parse("--objects many").is_err());
+        assert!(parse("--renderer quantum").is_err());
+        assert!(parse("--seconds").is_err()); // missing value
+        assert!(parse("--speed 3").is_err());
+    }
 }

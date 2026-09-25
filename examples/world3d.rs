@@ -32,6 +32,8 @@ const FLOOR_SIZE: usize = 20;
 const GRAVITY: f32 = 9.8;
 const THROW_SPEED: f32 = 14.0;
 const MAX_BALLS: usize = 40;
+/// Crates dropped with B are limited too, or the physics would slow to a crawl.
+const MAX_DROPPED_CRATES: usize = 40;
 
 /// How a physics body should be drawn.
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +49,8 @@ struct Playground {
     looks: HashMap<BodyId, Look>,
     /// Thrown balls, oldest first, so we can remove the oldest when there are too many.
     balls: VecDeque<BodyId>,
+    /// Crates dropped with B, oldest first, for the same reason.
+    dropped_crates: VecDeque<BodyId>,
     time: f32,
     // Meshes are built once, then drawn many times with different transforms.
     floor: Mesh,
@@ -64,6 +68,7 @@ impl Playground {
             world: PhysicsWorld::new(vec3(0.0, -GRAVITY, 0.0)),
             looks: HashMap::new(),
             balls: VecDeque::new(),
+            dropped_crates: VecDeque::new(),
             time: 0.0,
             floor: Mesh::checkerboard(FLOOR_SIZE, 1.0, GRASS_LIGHT, GRASS_DARK),
             crate_meshes: CRATE_COLORS.iter().map(|&c| Mesh::cube(c)).collect(),
@@ -116,9 +121,9 @@ impl Playground {
         id
     }
 
-    fn add_crate(&mut self, position: Vec3) {
+    fn add_crate(&mut self, position: Vec3) -> BodyId {
         let shade = self.looks.len() % CRATE_COLORS.len();
-        self.add(Body::block(position, Vec3::ONE), Look::Crate(shade));
+        self.add(Body::block(position, Vec3::ONE), Look::Crate(shade))
     }
 
     fn remove(&mut self, id: BodyId) {
@@ -146,7 +151,14 @@ impl Playground {
     fn drop_crate(&mut self) {
         // From the sky, a few meters in front of the camera.
         let ahead = self.camera.position + self.camera.forward() * 5.0;
-        self.add_crate(vec3(ahead.x, 8.0, ahead.z));
+        let id = self.add_crate(vec3(ahead.x, 8.0, ahead.z));
+        self.dropped_crates.push_back(id);
+
+        if self.dropped_crates.len() > MAX_DROPPED_CRATES {
+            if let Some(oldest) = self.dropped_crates.pop_front() {
+                self.remove(oldest);
+            }
+        }
     }
 
     /// The height of the highest fixed surface under `point`, to put shadows on.
@@ -218,6 +230,7 @@ impl Game for Playground {
         for id in fallen {
             self.remove(id);
             self.balls.retain(|&ball| ball != id);
+            self.dropped_crates.retain(|&crate_| crate_ != id);
         }
 
         self.time += ctx.dt();
@@ -307,4 +320,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Config::default()
     };
     duckforge::run(config, Playground::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_many_crates_keeps_the_count_limited() {
+        let mut game = Playground::new();
+        let before = game.world.len();
+        for _ in 0..200 {
+            game.drop_crate();
+        }
+        assert_eq!(game.dropped_crates.len(), MAX_DROPPED_CRATES);
+        assert_eq!(game.world.len(), before + MAX_DROPPED_CRATES);
+        assert_eq!(game.looks.len(), game.world.len() - 1); // every body but the ground
+    }
 }

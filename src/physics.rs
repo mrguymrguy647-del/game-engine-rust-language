@@ -62,6 +62,22 @@ pub enum Shape<V> {
 }
 
 impl<V: Vector> Shape<V> {
+    /// The same shape with every size made positive. A negative size can only
+    /// be a mistake, and treating it as positive is the kindest guess.
+    fn absolute(self) -> Self {
+        match self {
+            Shape::Ball { radius } => Shape::Ball {
+                radius: radius.abs(),
+            },
+            Shape::Block { mut half_size } => {
+                for axis in 0..V::DIMENSIONS {
+                    half_size = half_size.with(axis, half_size.get(axis).abs());
+                }
+                Shape::Block { half_size }
+            }
+        }
+    }
+
     /// The area (in 2D) or volume (in 3D). Used for a body's default mass.
     fn volume(&self) -> f32 {
         match *self {
@@ -82,10 +98,16 @@ impl<V: Vector> Shape<V> {
 /// Identifies one body in a [`PhysicsWorld`]. You get one from
 /// [`PhysicsWorld::add`] and use it to look the body up later.
 ///
-/// It's a *newtype*: a `usize` wrapped in its own type, so it can't be mixed
-/// up with any other number.
+/// Inside, it's the body's slot in the world's list plus a *generation*.
+/// When a body is removed, its slot is reused for the next body added, and
+/// the slot's generation goes up by one, so an id for the old body never
+/// finds the new one. Because the fields are private, an id can't be mixed
+/// up with any other number, or made up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BodyId(usize);
+pub struct BodyId {
+    slot: usize,
+    generation: u32,
+}
 
 /// One object in the physics world.
 ///
@@ -126,20 +148,18 @@ impl<V: Vector> Body<V> {
         }
     }
 
-    /// A ball (circle or sphere) centered on `position`.
+    /// A ball (circle or sphere) centered on `position`. A negative radius
+    /// counts as positive.
     pub fn ball(position: V, radius: f32) -> Self {
-        Self::new(position, Shape::Ball { radius })
+        Self::new(position, Shape::Ball { radius }.absolute())
     }
 
     /// A box centered on `position`. `size` is its full width and height
-    /// (and depth, in 3D).
+    /// (and depth, in 3D). A negative size counts as positive: a box can't
+    /// be inside out.
     pub fn block(position: V, size: V) -> Self {
-        Self::new(
-            position,
-            Shape::Block {
-                half_size: size * 0.5,
-            },
-        )
+        let half_size = size * 0.5;
+        Self::new(position, Shape::Block { half_size }.absolute())
     }
 
     /// Makes the body *fixed*: gravity and collisions never move it, like a
@@ -225,12 +245,24 @@ struct SolverContact<V> {
     friction_impulse: V,
 }
 
+/// A place in the world's list of bodies. See [`BodyId`].
+struct Slot<V> {
+    generation: u32,
+    body: Option<Body<V>>,
+}
+
 /// A collection of bodies that move and collide together.
 pub struct PhysicsWorld<V> {
     /// The acceleration applied to every non-fixed body, in units per second per second.
     pub gravity: V,
-    /// Removed bodies leave a `None` behind, so the other bodies' ids stay valid.
-    bodies: Vec<Option<Body<V>>>,
+    /// Every body, in a slot. A removed body leaves an empty slot, which the
+    /// next `add` reuses, so the list never grows beyond the most bodies
+    /// there have ever been at once.
+    bodies: Vec<Slot<V>>,
+    /// The numbers of the empty slots, ready for reuse.
+    free_slots: Vec<usize>,
+    /// How many slots hold a body.
+    live: usize,
     contacts: Vec<Contact<V>>,
 }
 
@@ -241,51 +273,110 @@ impl<V: Vector> PhysicsWorld<V> {
         Self {
             gravity,
             bodies: Vec::new(),
+            free_slots: Vec::new(),
+            live: 0,
             contacts: Vec::new(),
         }
     }
 
+    /// The id of whatever is in slot `slot` now.
+    fn id_of(&self, slot: usize) -> BodyId {
+        BodyId {
+            slot,
+            generation: self.bodies[slot].generation,
+        }
+    }
+
+    /// The slot for `id`, if it still holds that body.
+    fn slot(&self, id: BodyId) -> Option<&Slot<V>> {
+        self.bodies
+            .get(id.slot)
+            .filter(|slot| slot.generation == id.generation)
+    }
+
     /// Adds a body and returns its id.
     pub fn add(&mut self, body: Body<V>) -> BodyId {
-        self.bodies.push(Some(body));
-        BodyId(self.bodies.len() - 1)
+        self.live += 1;
+        if let Some(slot) = self.free_slots.pop() {
+            self.bodies[slot].body = Some(body);
+            self.id_of(slot)
+        } else {
+            self.bodies.push(Slot {
+                generation: 0,
+                body: Some(body),
+            });
+            self.id_of(self.bodies.len() - 1)
+        }
     }
 
     /// Removes a body, handing it back. Returns `None` if it was already gone.
     pub fn remove(&mut self, id: BodyId) -> Option<Body<V>> {
-        self.bodies.get_mut(id.0)?.take()
+        self.slot(id)?;
+        let body = self.empty_slot(id.slot)?;
+        self.contacts.retain(|c| c.a != id && c.b != id);
+        Some(body)
+    }
+
+    /// Takes the body out of a slot and makes the slot reusable.
+    fn empty_slot(&mut self, slot: usize) -> Option<Body<V>> {
+        let body = self.bodies[slot].body.take()?;
+        // Old ids for this slot must never find the next body put here.
+        self.bodies[slot].generation = self.bodies[slot].generation.wrapping_add(1);
+        self.free_slots.push(slot);
+        self.live -= 1;
+        Some(body)
     }
 
     /// Removes every body for which `keep` returns `false`.
     pub fn retain(&mut self, mut keep: impl FnMut(BodyId, &Body<V>) -> bool) {
-        for (i, slot) in self.bodies.iter_mut().enumerate() {
-            if slot.as_ref().is_some_and(|body| !keep(BodyId(i), body)) {
-                *slot = None;
+        for slot in 0..self.bodies.len() {
+            let id = self.id_of(slot);
+            if self.bodies[slot]
+                .body
+                .as_ref()
+                .is_some_and(|body| !keep(id, body))
+            {
+                self.empty_slot(slot);
             }
         }
+        // Forget contacts involving bodies that are gone.
+        let bodies = &self.bodies;
+        let alive = |id: BodyId| {
+            bodies
+                .get(id.slot)
+                .is_some_and(|slot| slot.generation == id.generation && slot.body.is_some())
+        };
+        self.contacts.retain(|c| alive(c.a) && alive(c.b));
     }
 
     /// Looks up a body to read it.
     pub fn get(&self, id: BodyId) -> Option<&Body<V>> {
-        self.bodies.get(id.0)?.as_ref()
+        self.slot(id)?.body.as_ref()
     }
 
     /// Looks up a body to change it.
     pub fn get_mut(&mut self, id: BodyId) -> Option<&mut Body<V>> {
-        self.bodies.get_mut(id.0)?.as_mut()
+        self.bodies
+            .get_mut(id.slot)
+            .filter(|slot| slot.generation == id.generation)?
+            .body
+            .as_mut()
     }
 
     /// Every body in the world, with its id.
     pub fn bodies(&self) -> impl Iterator<Item = (BodyId, &Body<V>)> {
-        self.bodies
-            .iter()
-            .enumerate()
-            .filter_map(|(i, slot)| slot.as_ref().map(|body| (BodyId(i), body)))
+        self.bodies.iter().enumerate().filter_map(|(slot, s)| {
+            let id = BodyId {
+                slot,
+                generation: s.generation,
+            };
+            s.body.as_ref().map(|body| (id, body))
+        })
     }
 
     /// How many bodies are in the world.
     pub fn len(&self) -> usize {
-        self.bodies.iter().filter(|slot| slot.is_some()).count()
+        self.live
     }
 
     pub fn is_empty(&self) -> bool {
@@ -306,7 +397,15 @@ impl<V: Vector> PhysicsWorld<V> {
 
     /// Moves the simulation forward by `dt` seconds. Call it once per frame
     /// with `ctx.dt()`.
+    ///
+    /// A `dt` that is zero, negative, infinite or not a number is ignored:
+    /// there's no sensible way to step by it, and a NaN would spread into
+    /// every body's position for good.
     pub fn step(&mut self, dt: f32) {
+        self.contacts.clear();
+        if !(dt.is_finite() && dt > 0.0) {
+            return;
+        }
         let h = dt / SUBSTEPS as f32;
         let mut touched = Vec::new();
         for _ in 0..SUBSTEPS {
@@ -314,7 +413,6 @@ impl<V: Vector> PhysicsWorld<V> {
         }
 
         // A pair may have touched in several substeps; report it once.
-        self.contacts.clear();
         let mut seen = HashSet::new();
         for contact in touched {
             if seen.insert((contact.a, contact.b)) {
@@ -324,8 +422,8 @@ impl<V: Vector> PhysicsWorld<V> {
     }
 
     fn substep(&mut self, h: f32, touched: &mut Vec<Contact<V>>) {
-        // 1. Gravity changes velocities. (`flatten` skips the removed bodies' `None`s.)
-        for body in self.bodies.iter_mut().flatten() {
+        // 1. Gravity changes velocities. (`filter_map` skips empty slots.)
+        for body in self.bodies.iter_mut().filter_map(|slot| slot.body.as_mut()) {
             if !body.is_fixed() {
                 body.velocity += self.gravity * h;
             }
@@ -343,7 +441,7 @@ impl<V: Vector> PhysicsWorld<V> {
         }
 
         // 4. Move.
-        for body in self.bodies.iter_mut().flatten() {
+        for body in self.bodies.iter_mut().filter_map(|slot| slot.body.as_mut()) {
             body.position += body.velocity * h;
         }
 
@@ -354,8 +452,8 @@ impl<V: Vector> PhysicsWorld<V> {
         }
 
         touched.extend(contacts.iter().map(|c| Contact {
-            a: BodyId(c.a),
-            b: BodyId(c.b),
+            a: self.id_of(c.a),
+            b: self.id_of(c.b),
             normal: c.normal,
             depth: c.depth,
         }));
@@ -371,9 +469,9 @@ impl<V: Vector> PhysicsWorld<V> {
 
         let mut contacts = Vec::new();
         for (i, slot_a) in self.bodies.iter().enumerate() {
-            let Some(a) = slot_a else { continue };
+            let Some(a) = &slot_a.body else { continue };
             for (j, slot_b) in self.bodies.iter().enumerate().skip(i + 1) {
-                let Some(b) = slot_b else { continue };
+                let Some(b) = &slot_b.body else { continue };
                 if a.is_fixed() && b.is_fixed() {
                     continue; // walls never need to collide with walls
                 }
@@ -412,11 +510,17 @@ impl<V: Vector> PhysicsWorld<V> {
 /// mutable borrows of `items`, and the compiler can't tell that `i != j`.
 /// `split_at_mut` cuts the slice into two halves that don't overlap, which
 /// the compiler *can* hand out separately.
-fn pair_mut<V>(bodies: &mut [Option<Body<V>>], i: usize, j: usize) -> (&mut Body<V>, &mut Body<V>) {
+fn pair_mut<V>(bodies: &mut [Slot<V>], i: usize, j: usize) -> (&mut Body<V>, &mut Body<V>) {
     assert!(i < j);
     let (left, right) = bodies.split_at_mut(j);
-    let a = left[i].as_mut().expect("contact refers to a removed body");
-    let b = right[0].as_mut().expect("contact refers to a removed body");
+    let a = left[i]
+        .body
+        .as_mut()
+        .expect("contact refers to a removed body");
+    let b = right[0]
+        .body
+        .as_mut()
+        .expect("contact refers to a removed body");
     (a, b)
 }
 
@@ -476,7 +580,8 @@ fn separate<V: Vector>(a: &mut Body<V>, b: &mut Body<V>) {
 /// Do two bodies overlap? If so, returns the direction from `a` to `b` and
 /// how deep the overlap is.
 fn collide<V: Vector>(a: &Body<V>, b: &Body<V>) -> Option<(V, f32)> {
-    match (a.shape, b.shape) {
+    // `shape` is a public field, so a game could have set a negative size.
+    match (a.shape.absolute(), b.shape.absolute()) {
         (Shape::Ball { radius: ra }, Shape::Ball { radius: rb }) => {
             ball_vs_ball(a.position, ra, b.position, rb)
         }
@@ -541,11 +646,12 @@ fn ball_vs_block<V: Vector>(ball: V, radius: f32, block: V, half: V) -> Option<(
     let offset = ball - block;
 
     // The point of the box closest to the ball's center: clamp each
-    // coordinate to the box's extent.
+    // coordinate to the box's extent. (`max` then `min`, not `clamp`, which
+    // would panic if a size were NaN.)
     let mut closest = offset;
     for axis in 0..V::DIMENSIONS {
         let limit = half.get(axis);
-        closest = closest.with(axis, offset.get(axis).clamp(-limit, limit));
+        closest = closest.with(axis, offset.get(axis).max(-limit).min(limit));
     }
 
     if closest != offset {
@@ -772,5 +878,78 @@ mod tests {
         wall.apply_impulse(vec2(10.0, 0.0));
         assert_eq!(wall.velocity, Vec2::ZERO);
         assert!(wall.mass().is_infinite());
+    }
+
+    #[test]
+    fn removed_slots_are_reused() {
+        let mut world = PhysicsWorld::new(Vec2::ZERO);
+        for _ in 0..10_000 {
+            let id = world.add(Body::ball(Vec2::ZERO, 1.0));
+            world.remove(id);
+        }
+        // Each step walks every slot, so they must not pile up.
+        assert!(
+            world.bodies.len() <= 1,
+            "{} slots for 0 bodies",
+            world.bodies.len()
+        );
+        assert!(world.is_empty());
+    }
+
+    #[test]
+    fn old_ids_never_reach_a_new_body_in_the_same_slot() {
+        let mut world = PhysicsWorld::new(Vec2::ZERO);
+        let old = world.add(Body::ball(Vec2::ZERO, 1.0));
+        world.remove(old);
+        let new = world.add(Body::ball(vec2(5.0, 0.0), 1.0));
+        assert_ne!(old, new);
+        assert!(world.get(old).is_none());
+        assert!(world.remove(old).is_none()); // must not remove the new body
+        assert_eq!(world.get(new).unwrap().position, vec2(5.0, 0.0));
+        assert_eq!(world.len(), 1);
+    }
+
+    #[test]
+    fn removed_bodies_stop_touching() {
+        let (mut world, floor) = world_with_floor();
+        let ball = world.add(Body::ball(vec2(0.0, 190.0), 10.0));
+        world.step(DT);
+        assert!(world.touching(ball, floor));
+        world.remove(ball);
+        assert!(!world.touching(ball, floor));
+        assert!(world.contacts().iter().all(|c| c.a != ball && c.b != ball));
+    }
+
+    #[test]
+    fn bad_time_steps_are_ignored() {
+        let (mut world, _) = world_with_floor();
+        let ball = world.add(Body::ball(vec2(0.0, 0.0), 10.0));
+        for dt in [f32::NAN, f32::INFINITY, -1.0, 0.0] {
+            world.step(dt);
+        }
+        let b = world.get(ball).unwrap();
+        assert_eq!((b.position, b.velocity), (Vec2::ZERO, Vec2::ZERO));
+        world.step(DT); // and it still works afterwards
+        assert!(world.get(ball).unwrap().position.y > 0.0);
+    }
+
+    #[test]
+    fn negative_sizes_act_like_positive_ones() {
+        let (mut world, _) = world_with_floor();
+        let block = world.add(Body::block(vec2(-100.0, 0.0), vec2(-20.0, -20.0)));
+        let ball = world.add(Body::ball(vec2(100.0, 0.0), -10.0));
+        run(&mut world, 3.0);
+        // Both come to rest on the floor (top at y = 200) instead of falling through.
+        assert!((world.get(block).unwrap().position.y - 190.0).abs() < 1.0);
+        assert!((world.get(ball).unwrap().position.y - 190.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn negative_sizes_set_directly_on_the_shape_do_not_crash() {
+        let (mut world, _) = world_with_floor();
+        let ball = world.add(Body::ball(vec2(0.0, 0.0), 10.0));
+        world.get_mut(ball).unwrap().shape = Shape::Ball { radius: -10.0 };
+        run(&mut world, 3.0);
+        assert!((world.get(ball).unwrap().position.y - 190.0).abs() < 1.0);
     }
 }

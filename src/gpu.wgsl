@@ -51,9 +51,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // changes from this pixel to its right and lower neighbors: two
     // directions lying flat in the triangle. Their cross product sticks
     // straight out of it, just like `(b - a).cross(c - a)` on the CPU.
-    var normal = normalize(cross(dpdx(in.world_position), dpdy(in.world_position)));
+    let to_camera = globals.camera_position.xyz - in.world_position;
+    var normal = cross(dpdx(in.world_position), dpdy(in.world_position));
+    // A zero-length normal can't be normalized (it would give NaN, and a
+    // black pixel). It only happens for triangles too thin to see, so any
+    // direction will do: face the camera.
+    if dot(normal, normal) == 0.0 {
+        normal = to_camera;
+    }
+    normal = normalize(normal);
     // Make sure it points out of the front, towards the camera.
-    if dot(normal, globals.camera_position.xyz - in.world_position) < 0.0 {
+    if dot(normal, to_camera) < 0.0 {
         normal = -normal;
     }
 

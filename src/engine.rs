@@ -56,6 +56,28 @@ pub struct Config {
     pub renderer: Renderer,
 }
 
+impl Config {
+    /// Checks that the settings can make a window, with a message saying
+    /// what's wrong if not.
+    fn check(&self) -> Result<(), String> {
+        if self.width == 0 || self.height == 0 {
+            return Err(format!(
+                "the canvas must be at least 1 x 1 pixels, not {} x {}",
+                self.width, self.height
+            ));
+        }
+        if self.scale == 0 {
+            return Err(String::from("scale must be at least 1"));
+        }
+        let window_fits = self.width.checked_mul(self.scale).is_some()
+            && self.height.checked_mul(self.scale).is_some();
+        if !window_fits {
+            return Err(String::from("width or height times scale is too big"));
+        }
+        Ok(())
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -77,7 +99,9 @@ pub struct Context {
     /// A random number generator, seeded differently on every run.
     pub rng: Rng,
     dt: f32,
-    time: f32,
+    /// Seconds since the start, as an `f64`: adding up small `f32` steps
+    /// loses precision after an hour or so, and the clock would drift.
+    time: f64,
     frame: u64,
     /// Seconds per frame, averaged over recent frames. 0.0 until measured.
     average_frame_time: f32,
@@ -111,7 +135,7 @@ impl Context {
 
     /// Seconds since the game started.
     pub fn time(&self) -> f32 {
-        self.time
+        self.time as f32
     }
 
     /// How many frames have run so far, starting at 1.
@@ -154,7 +178,7 @@ impl Context {
     /// time; the game sees it capped at [`MAX_DT`].
     pub(crate) fn begin_frame(&mut self, real_dt: f32, keys_down: impl IntoIterator<Item = Key>) {
         self.dt = real_dt.min(MAX_DT);
-        self.time += self.dt;
+        self.time += self.dt as f64;
         self.frame += 1;
         // The first frame is timed from just before the loop started, so its
         // time is meaningless (almost zero): skip it.
@@ -186,6 +210,7 @@ impl Context {
 /// Two keys work in every game: **F3** shows or hides an FPS counter, and
 /// **F12** saves a screenshot.
 pub fn run<G: Game>(config: Config, mut game: G) -> Result<(), Box<dyn Error>> {
+    config.check()?;
     let options = WindowOptions {
         resize: true,
         scale_mode: ScaleMode::AspectRatioStretch,
@@ -279,6 +304,9 @@ fn window_to_canvas(
 ) -> Option<Vec2> {
     let (window_w, window_h) = (window_size.0 as f32, window_size.1 as f32);
     let (canvas_w, canvas_h) = (canvas_size.0 as f32, canvas_size.1 as f32);
+    if canvas_w == 0.0 || canvas_h == 0.0 {
+        return None; // nothing to point at
+    }
     let scale = (window_w / canvas_w).min(window_h / canvas_h);
     if scale <= 0.0 {
         return None; // minimized
@@ -450,5 +478,45 @@ mod tests {
 
         // A minimized window has no size.
         assert_eq!(window_to_canvas((5.0, 5.0), (0, 0), (320, 240)), None);
+    }
+
+    #[test]
+    fn time_stays_accurate_over_long_sessions() {
+        let mut ctx = Context::new(10, 10);
+        let frames = 1_000_000; // about 4.6 hours at 60 FPS
+        for _ in 0..frames {
+            ctx.begin_frame(1.0 / 60.0, []);
+        }
+        let expected = frames as f32 / 60.0;
+        assert!(
+            (ctx.time() - expected).abs() < 0.1,
+            "time = {}, expected {expected}",
+            ctx.time()
+        );
+    }
+
+    #[test]
+    fn impossible_configs_get_a_clear_error() {
+        assert!(Config::default().check().is_ok());
+        let no_width = Config {
+            width: 0,
+            ..Config::default()
+        };
+        assert!(no_width.check().unwrap_err().contains("at least 1 x 1"));
+        let no_scale = Config {
+            scale: 0,
+            ..Config::default()
+        };
+        assert!(no_scale.check().is_err());
+        let overflowing = Config {
+            width: usize::MAX,
+            ..Config::default()
+        };
+        assert!(overflowing.check().is_err());
+    }
+
+    #[test]
+    fn a_canvas_with_no_pixels_has_no_mouse_position() {
+        assert_eq!(window_to_canvas((5.0, 5.0), (100, 100), (0, 0)), None);
     }
 }

@@ -17,6 +17,15 @@ wgpu = { version = "30", optional = true }
 pollster = { version = "1", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 
+# Also run the tests inside these examples with `cargo test`.
+[[example]]
+name = "stress3d"
+test = true
+
+[[example]]
+name = "world3d"
+test = true
+
 # Optimize a little even in debug builds, so games run smoothly with a
 # plain `cargo run` (the default debug build is very slow for pixel work).
 [profile.dev]

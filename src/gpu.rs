@@ -22,7 +22,7 @@ use std::hash::{BuildHasherDefault, Hash, Hasher};
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::render3d::{Camera3D, Mesh, Transform};
+use crate::render3d::{Camera3D, Mesh, Transform, triangle_corners};
 
 /// One corner of one triangle, laid out exactly as the shader reads it.
 ///
@@ -161,6 +161,10 @@ struct GpuMesh {
 /// Meshes not drawn for this many flushes are removed from the GPU.
 const EVICT_AFTER_FLUSHES: u64 = 120;
 
+/// The most objects in one batch. With more, the batch is drawn early, so the
+/// buffer of object matrices never grows past what the GPU allows.
+const MAX_BATCH_INSTANCES: usize = 1 << 20;
+
 /// Everything needed to draw 3D on the GPU for one canvas size.
 pub(crate) struct GpuRenderer {
     device: wgpu::Device,
@@ -193,6 +197,9 @@ pub(crate) struct GpuRenderer {
     /// Whether the next flush starts with an empty depth buffer.
     clear_depth: bool,
     flushes: u64,
+    /// How many objects are waiting in `pending`, and how many may.
+    pending_instances: usize,
+    max_batch_instances: usize,
 }
 
 impl GpuRenderer {
@@ -221,12 +228,37 @@ impl GpuRenderer {
         let info = adapter.get_info();
         let description = format!("GPU: {} ({:?})", info.name, info.backend);
 
+        // Every graphics card has limits, like how big a picture it can draw.
+        // Check the canvas fits, rather than letting wgpu fail later.
+        let supported = adapter.limits();
+        let padded_bytes_per_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback_size = padded_bytes_per_row as u64 * height as u64;
+        let biggest = supported.max_texture_dimension_2d;
+        if width > biggest || height > biggest || readback_size > supported.max_buffer_size {
+            return Err(format!(
+                "the canvas is {width} x {height} pixels, but this graphics card can only \
+                 draw pictures up to {biggest} x {biggest}"
+            ));
+        }
+
         // 3. A *device* is our connection to the adapter; the *queue* sends it work.
+        //    We ask for modest limits that older graphics cards can meet too,
+        //    except for picture and buffer sizes, where we take what the card has.
+        let limits = wgpu::Limits {
+            max_texture_dimension_2d: supported.max_texture_dimension_2d,
+            max_buffer_size: supported.max_buffer_size,
+            ..wgpu::Limits::downlevel_defaults()
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("duckforge"),
+            required_limits: limits.clone(),
             ..Default::default()
         }))
         .map_err(|err| format!("could not open the graphics device: {err}"))?;
+        let max_batch_instances =
+            ((limits.max_buffer_size / std::mem::size_of::<Instance>() as u64) as usize)
+                .clamp(1, MAX_BATCH_INSTANCES);
 
         // 4. The shader programs, and a *pipeline*: the full recipe for drawing.
         let shader = device.create_shader_module(wgpu::include_wgsl!("gpu.wgsl"));
@@ -353,12 +385,11 @@ impl GpuRenderer {
             view_formats: &[],
         });
 
-        // Copies from a texture into a buffer need each row to take a multiple of 256 bytes.
-        let padded_bytes_per_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        // Copies from a texture into a buffer need each row to take a
+        // multiple of 256 bytes, hence `padded_bytes_per_row` above.
         let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
-            size: padded_bytes_per_row as u64 * height as u64,
+            size: readback_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -385,6 +416,8 @@ impl GpuRenderer {
             camera: None,
             clear_depth: true,
             flushes: 0,
+            pending_instances: 0,
+            max_batch_instances,
         })
     }
 
@@ -397,6 +430,7 @@ impl GpuRenderer {
     /// batch with an empty depth buffer.
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
+        self.pending_instances = 0;
         self.seen.clear();
         self.camera = None;
         self.clear_depth = true;
@@ -410,6 +444,9 @@ impl GpuRenderer {
         camera: &Camera3D,
         pixels: &mut [u32],
     ) {
+        if mesh.triangles.is_empty() {
+            return; // nothing to draw (and the GPU can't hold an empty buffer)
+        }
         // Everything in one batch shares a camera. A new camera? Draw what we have first.
         if self.camera.is_some_and(|current| current != *camera) {
             self.flush(pixels);
@@ -426,6 +463,10 @@ impl GpuRenderer {
             model: transform.matrix().columns,
         };
         self.pending.entry(key).or_default().push(instance);
+        self.pending_instances += 1;
+        if self.pending_instances >= self.max_batch_instances {
+            self.flush(pixels); // a huge batch: draw this part now
+        }
     }
 
     /// Works out the cache key for `mesh`, fingerprinting it only if this
@@ -436,13 +477,13 @@ impl GpuRenderer {
         match self.seen.get(&address) {
             Some(seen) if seen.sample == quick => (address, seen.fingerprint),
             _ => {
-                let print = fingerprint(mesh);
+                let full = fingerprint(mesh);
                 let seen = Seen {
                     sample: quick,
-                    fingerprint: print,
+                    fingerprint: full,
                 };
                 self.seen.insert(address, seen);
-                (address, print)
+                (address, full)
             }
         }
     }
@@ -453,14 +494,12 @@ impl GpuRenderer {
         let vertices: Vec<Vertex> = mesh
             .triangles
             .iter()
-            .flat_map(|triangle| {
+            .enumerate()
+            .flat_map(|(index, triangle)| {
                 let color = [triangle.color.r, triangle.color.g, triangle.color.b, 255];
-                triangle.corners.map(|i| {
-                    let p = mesh.vertices[i];
-                    Vertex {
-                        position: [p.x, p.y, p.z],
-                        color,
-                    }
+                triangle_corners(&mesh.vertices, index, triangle).map(|p| Vertex {
+                    position: [p.x, p.y, p.z],
+                    color,
                 })
             })
             .collect();
@@ -525,7 +564,7 @@ impl GpuRenderer {
         let total: usize = batches.iter().map(|(_, instances)| instances.len()).sum();
         let needed = (total * std::mem::size_of::<Instance>()) as u64;
         if self.instance_buffer.size() < needed {
-            let capacity = total.next_power_of_two();
+            let capacity = total.next_power_of_two().min(self.max_batch_instances);
             self.instance_buffer = create_instance_buffer(&self.device, capacity);
         }
         let all_instances: Vec<Instance> = batches
@@ -630,6 +669,7 @@ impl GpuRenderer {
         self.meshes
             .retain(|_, mesh| now - mesh.last_used <= EVICT_AFTER_FLUSHES);
         self.seen.clear(); // next batch: check every mesh again
+        self.pending_instances = 0;
         self.clear_depth = false;
     }
 }
@@ -649,6 +689,7 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffe
 
 #[cfg(test)]
 mod tests {
+    use super::GpuRenderer;
     use crate::canvas::Canvas;
     use crate::color::Color;
     use crate::math::{Rect, Vec3, vec3};
@@ -814,5 +855,61 @@ mod tests {
             lit > 3_000,
             "10,000 cubes should cover much of the view ({lit} pixels lit)"
         );
+    }
+
+    #[test]
+    fn very_large_batches_are_split() {
+        let Ok(mut gpu) = GpuRenderer::new(40, 40) else {
+            return;
+        };
+        let camera = Camera3D::looking_at(vec3(0.0, 20.0, -0.1), Vec3::ZERO);
+        let cube = Mesh::cube(Color::ORANGE);
+        let draw_all = |gpu: &mut GpuRenderer, pixels: &mut [u32]| {
+            for i in 0..25 {
+                let at = vec3((i % 5) as f32 * 2.0 - 4.0, 0.0, (i / 5) as f32 * 2.0 - 4.0);
+                gpu.draw(&cube, &Transform::at(at), &camera, pixels);
+            }
+            gpu.flush(pixels);
+        };
+
+        let mut one_batch = vec![0; 40 * 40];
+        draw_all(&mut gpu, &mut one_batch);
+
+        gpu.clear();
+        gpu.max_batch_instances = 10; // pretend the GPU only takes 10 at a time
+        let before = gpu.flushes;
+        let mut split = vec![0; 40 * 40];
+        draw_all(&mut gpu, &mut split);
+
+        assert_eq!(gpu.flushes - before, 3, "25 objects in batches of 10");
+        assert_eq!(one_batch, split, "splitting must not change the picture");
+    }
+
+    #[test]
+    fn empty_meshes_draw_nothing() {
+        let Some(mut canvas) = gpu_canvas(32, 24) else {
+            return;
+        };
+        let camera = Camera3D::new(vec3(0.0, 0.0, -3.0));
+        canvas.clear(Color::BLACK);
+        let nothing = Mesh::checkerboard(0, 1.0, Color::RED, Color::RED);
+        canvas.draw_mesh(&Mesh::new(), &Transform::default(), &camera);
+        canvas.draw_mesh(&nothing, &Transform::default(), &camera);
+        canvas.draw_mesh(&Mesh::cube(Color::RED), &Transform::default(), &camera);
+        canvas.flush_3d();
+        assert!(
+            canvas.get_pixel(16, 12).unwrap().r > 100,
+            "the cube still draws"
+        );
+    }
+
+    #[test]
+    fn canvases_too_big_for_the_gpu_fall_back_to_the_cpu() {
+        let mut canvas = Canvas::new(40_000, 2); // wider than any GPU allows
+        canvas.set_renderer(Renderer::Gpu);
+        let camera = Camera3D::new(vec3(0.0, 0.0, -3.0));
+        canvas.draw_mesh(&Mesh::cube(Color::RED), &Transform::default(), &camera);
+        canvas.flush_3d();
+        assert_eq!(canvas.renderer_name(), "CPU");
     }
 }

@@ -46,9 +46,9 @@ impl Rng {
         (self.next_u32() >> 8) as f32 / (1u32 << 24) as f32
     }
 
-    /// A random float in `min..max`.
+    /// A random float in `min..max` (`max` itself is never returned).
     pub fn range(&mut self, min: f32, max: f32) -> f32 {
-        min + (max - min) * self.next_f32()
+        between(min, max, self.next_f32())
     }
 
     /// A random integer in `min..max` (`max` excluded). Returns `min` if the range is empty.
@@ -63,6 +63,22 @@ impl Rng {
     /// Returns `true` with the given probability (`0.25` = 25% of the time).
     pub fn chance(&mut self, probability: f32) -> bool {
         self.next_f32() < probability
+    }
+}
+
+/// The number `unit` of the way from `min` to `max`, where `unit` is in
+/// `0.0..1.0`, and never `max` itself.
+///
+/// Rounding can land exactly on `max` even though `unit` is below 1.0:
+/// `1.0 + 0.99999994` rounds to `2.0`. That matters, because code like
+/// `list[rng.range(0.0, len as f32) as usize]` would then index one past the
+/// end of the list. So in that case we step down to the next number below `max`.
+fn between(min: f32, max: f32, unit: f32) -> f32 {
+    let value = min + (max - min) * unit;
+    if value >= max && max > min {
+        max.next_down()
+    } else {
+        value
     }
 }
 
@@ -95,5 +111,17 @@ mod tests {
             assert!((-5..5).contains(&i));
         }
         assert_eq!(rng.range_i32(3, 3), 3);
+    }
+
+    #[test]
+    fn range_never_returns_max() {
+        // The biggest value next_f32 can return.
+        let highest = 1.0 - 1.0 / (1u32 << 24) as f32;
+        assert_eq!(1.0 + highest, 2.0); // why this matters: rounding reaches `max`
+        for (min, max) in [(1.0, 2.0), (0.0, 1.0), (-3.0, 5.0), (0.0, 1e-30)] {
+            let value = between(min, max, highest);
+            assert!(value >= min && value < max, "{min}..{max} gave {value}");
+        }
+        assert_eq!(between(4.0, 4.0, highest), 4.0); // an empty range gives `min`
     }
 }

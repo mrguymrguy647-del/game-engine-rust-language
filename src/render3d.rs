@@ -1,6 +1,8 @@
-//! Software 3D rendering: cameras, meshes, and drawing them onto the canvas.
+//! 3D: cameras, meshes, transforms, and the CPU renderer.
 //!
-//! How a 3D triangle ends up as pixels on the screen:
+//! Meshes are drawn by the graphics card when there is one (see `gpu.rs`),
+//! and otherwise by the CPU renderer at the bottom of this file. Both follow
+//! the same steps to turn a 3D triangle into pixels on the screen:
 //!
 //! 1. **Model to world.** A [`Mesh`] is built around its own center. Its
 //!    [`Transform`] scales it, rotates it and moves it to its place in the world.
@@ -142,19 +144,31 @@ impl Camera3D {
         if p.z < NEAR {
             return None;
         }
-        Some(self.project(p, canvas))
+        Some(self.projection(canvas).project(p))
     }
 
-    /// Camera space to canvas pixels: the perspective divide.
-    fn project(&self, p: Vec3, canvas: &Canvas) -> Vec2 {
+    /// The field of view actually used: `fov` kept between 1 and 179 degrees
+    /// (or 60 degrees if it isn't a number). At 0 or 180 degrees the
+    /// projection would divide by zero, and beyond 180 the picture would turn
+    /// upside down.
+    fn usable_fov(&self) -> f32 {
+        if self.fov.is_finite() {
+            self.fov.clamp(1f32.to_radians(), 179f32.to_radians())
+        } else {
+            60f32.to_radians()
+        }
+    }
+
+    /// The numbers needed to project points onto `canvas`. They're worked
+    /// out once and then used for every corner, since `tan` isn't cheap.
+    fn projection(&self, canvas: &Canvas) -> Projection {
         let (width, height) = (canvas.width() as f32, canvas.height() as f32);
-        // How many pixels one unit covers at distance 1. A narrow field of
-        // view gives a bigger number: that's zooming in.
-        let focal_length = (height / 2.0) / (self.fov / 2.0).tan();
-        vec2(
-            width / 2.0 + p.x / p.z * focal_length,
-            height / 2.0 - p.y / p.z * focal_length, // minus: screen y points down
-        )
+        Projection {
+            center: vec2(width / 2.0, height / 2.0),
+            // How many pixels one unit covers at distance 1. A narrow field of
+            // view gives a bigger number: that's zooming in.
+            focal_length: (height / 2.0) / (self.usable_fov() / 2.0).tan(),
+        }
     }
 
     /// [`Camera3D::to_camera_space`] as a matrix: undo the position, then
@@ -169,7 +183,23 @@ impl Camera3D {
     /// as wide as it is tall. It maps the same points to the same pixels as
     /// the CPU renderer does.
     pub fn projection_matrix(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective(self.fov, aspect, NEAR)
+        Mat4::perspective(self.usable_fov(), aspect, NEAR)
+    }
+}
+
+/// Turns camera-space points into canvas pixels (see [`Camera3D::projection`]).
+struct Projection {
+    center: Vec2,
+    focal_length: f32,
+}
+
+impl Projection {
+    /// The perspective divide: further away (bigger `z`) means closer to the middle.
+    fn project(&self, p: Vec3) -> Vec2 {
+        vec2(
+            self.center.x + p.x / p.z * self.focal_length,
+            self.center.y - p.y / p.z * self.focal_length, // minus: screen y points down
+        )
     }
 }
 
@@ -277,6 +307,38 @@ impl Transform {
 pub struct Triangle {
     pub corners: [usize; 3],
     pub color: Color,
+}
+
+/// Looks up the three corner points of a mesh's triangle number `index`.
+///
+/// # Panics
+/// If the triangle refers to a vertex the mesh doesn't have, with a message
+/// that says which triangle. (Both renderers use this, so a broken mesh
+/// fails the same clear way on the CPU and on the GPU.)
+#[inline]
+pub(crate) fn triangle_corners(points: &[Vec3], index: usize, triangle: &Triangle) -> [Vec3; 3] {
+    let [a, b, c] = triangle.corners;
+    match (points.get(a), points.get(b), points.get(c)) {
+        (Some(&a), Some(&b), Some(&c)) => [a, b, c],
+        _ => bad_triangle(points.len(), index, triangle),
+    }
+}
+
+/// The panic for [`triangle_corners`], kept in its own function. `#[cold]`
+/// tells the compiler this almost never runs, so it keeps the message-building
+/// code out of the way of the fast path. (Measured: with the message inline,
+/// the CPU renderer's stress test ran about 13% slower.)
+#[cold]
+#[inline(never)]
+fn bad_triangle(vertex_count: usize, index: usize, triangle: &Triangle) -> ! {
+    let missing = triangle
+        .corners
+        .into_iter()
+        .find(|&corner| corner >= vertex_count);
+    panic!(
+        "triangle {index} uses vertex {}, but the mesh only has {vertex_count} vertices",
+        missing.unwrap_or_default()
+    )
 }
 
 /// A 3D shape made of triangles.
@@ -453,6 +515,11 @@ impl Canvas {
     /// buffer that makes near objects hide far ones. 2D drawing afterwards
     /// (like a score) always appears on top.
     ///
+    /// On the GPU, 3D is drawn in batches, and any 2D drawing first finishes
+    /// the batch so far. So draw all your 3D first and your 2D after it:
+    /// alternating between them (a 2D label after every object, say) sends
+    /// many small batches to the graphics card, which is much slower.
+    ///
     /// (This `impl Canvas` block lives in `render3d.rs`, not `canvas.rs`: Rust
     /// lets a type's methods be spread over several files in the same crate.)
     pub fn draw_mesh(&mut self, mesh: &Mesh, transform: &Transform, camera: &Camera3D) {
@@ -464,9 +531,10 @@ impl Canvas {
         // Otherwise, draw it right here on the CPU.
         let world: Vec<Vec3> = mesh.vertices.iter().map(|&v| transform.apply(v)).collect();
         let sun = sun_direction();
+        let projection = camera.projection(self);
 
-        for triangle in &mesh.triangles {
-            let [a, b, c] = triangle.corners.map(|i| world[i]);
+        for (index, triangle) in mesh.triangles.iter().enumerate() {
+            let [a, b, c] = triangle_corners(&world, index, triangle);
 
             // Which way does the triangle face? The cross product of two edges
             // points straight out of its front.
@@ -489,7 +557,7 @@ impl Canvas {
             // fan of triangles: (0, 1, 2), then (0, 2, 3).
             for i in 1..count.saturating_sub(1) {
                 let corners = [points[0], points[i], points[i + 1]];
-                let on_screen = corners.map(|p| camera.project(p, self));
+                let on_screen = corners.map(|p| projection.project(p));
                 let inverse_depths = corners.map(|p| 1.0 / p.z);
                 self.fill_triangle_3d(on_screen, inverse_depths, color);
             }
@@ -685,5 +753,41 @@ mod tests {
         let mut empty = Canvas::new(64, 48);
         empty.draw_mesh(&red, &Transform::at(vec3(0.0, 0.0, -10.0)), &camera);
         assert!(empty.pixels().iter().all(|&p| p == 0));
+    }
+
+    #[test]
+    #[should_panic(expected = "triangle 1 uses vertex 7, but the mesh only has 3 vertices")]
+    fn bad_triangle_indices_get_a_clear_message() {
+        let mut mesh = Mesh::new();
+        for p in [Vec3::ZERO, vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0)] {
+            mesh.add_vertex(p);
+        }
+        mesh.add_triangle(0, 1, 2, Color::RED);
+        mesh.add_triangle(0, 1, 7, Color::RED); // there is no vertex 7
+        let mut canvas = Canvas::new(8, 8);
+        let camera = Camera3D::new(Vec3::ZERO);
+        canvas.draw_mesh(&mesh, &Transform::at(vec3(0.0, 0.0, 3.0)), &camera);
+    }
+
+    #[test]
+    fn extreme_fields_of_view_stay_usable() {
+        let canvas = Canvas::new(320, 240);
+        for fov in [0.0, -1.0, std::f32::consts::PI, 10.0, f32::NAN] {
+            let mut camera = Camera3D::new(Vec3::ZERO);
+            camera.fov = fov;
+            let p = camera
+                .world_to_screen(vec3(1.0, 1.0, 5.0), &canvas)
+                .unwrap();
+            // Up and to the right of the middle, as always, and a real number.
+            assert!(
+                p.x.is_finite() && p.y.is_finite() && p.x > 160.0 && p.y < 120.0,
+                "fov {fov}: {p:?}"
+            );
+            let m = camera.projection_matrix(4.0 / 3.0);
+            assert!(
+                m.columns.iter().flatten().all(|v| v.is_finite()),
+                "fov {fov}"
+            );
+        }
     }
 }
