@@ -43,7 +43,8 @@ Keep the source files open next to this guide. When you see a file like
 - **Part 3: Your turn**
   - [22. Exercises](#22-exercises)
   - [23. Common compiler errors](#23-common-compiler-errors)
-  - [24. Where to go next](#24-where-to-go-next)
+  - [24. What a code review found](#24-what-a-code-review-found)
+  - [25. Where to go next](#25-where-to-go-next)
 
 ---
 
@@ -471,18 +472,29 @@ everything else keeps a sensible default.
 
 ### Newtypes
 
-`PhysicsWorld::add` gives you back a `BodyId`, which is just a number in
+`PhysicsWorld::add` gives you back a `BodyId`, which is just two numbers in
 disguise:
 
 ```rust
-pub struct BodyId(usize);
+pub struct BodyId {
+    slot: usize,
+    generation: u32,
+}
 ```
 
-A struct with unnamed fields is a *tuple struct*. Wrapping a single value
-like this is called a **newtype**. Why not just return a `usize`? Because
-then you could accidentally pass a score or an array index where a body id
-belongs. As its own type, that mix-up won't compile. And because the field
-isn't `pub`, games can't make up fake ids either.
+Why not just return a `usize`? Because then you could accidentally pass a
+score or an array index where a body id belongs. As its own type, that
+mix-up won't compile. Wrapping a plain value in a type of its own like this
+is called a **newtype**. And because the fields aren't `pub`, games can't
+make up fake ids either.
+
+The two numbers are the body's *slot* in the world's list of bodies, and a
+*generation*. When a body is removed, its slot is reused for the next body
+added, and the slot's generation goes up by one. So an old id still points
+at the right slot, but its generation doesn't match any more, and looking
+it up finds nothing instead of the wrong body. This trick is called a
+*generational index*, and most game engines use it to name their objects.
+(Chapter 24 tells the story of the bug that led to it.)
 
 ## 5. Enums and pattern matching
 
@@ -1659,6 +1671,11 @@ the drawn pixels have drifted from the true line. When the error gets too
 big it takes a step sideways. It uses only integer addition, which mattered
 a lot on 1960s hardware.
 
+Before stepping, the line is *clipped*: cut down to the part that's on the
+canvas (see `clip_line`). Without that, a line to a point far off-screen
+would step through millions of invisible pixels, and could even crash (see
+[chapter 24](#24-what-a-code-review-found)).
+
 ### Triangles
 
 `fill_triangle` matters most of all, because everything in 3D is made of
@@ -2698,7 +2715,158 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For a long explanation of any error, run `rustc --explain E0502`.
 
-## 24. Where to go next
+## 24. What a code review found
+
+After the engine was built, it got a careful review: every file read line
+by line, looking for bugs, crashes and confusing code. It found about 20
+problems. For each bug, a test was written *first*, and the test failed,
+proving the bug was real. Then the fix made it pass. Here are the lessons,
+with the real error messages.
+
+### Integers overflow, and debug builds catch it
+
+```rust
+canvas.draw_line(vec2(-1e10, 5.0), vec2(1e10, 5.0), Color::RED);
+```
+
+```text
+attempt to subtract with overflow
+```
+
+The ends were turned into `i32` pixel coordinates. `-1e10` doesn't fit, so
+Rust *saturates* it to the smallest `i32`, about -2.1 billion (the biggest
+`i32` is about 2.1 billion). Then `x_end - x` subtracts two
+huge numbers, and the result doesn't fit either. In debug builds, Rust
+checks every integer operation for overflow and panics. Release builds
+don't check: the number silently wraps around to a wrong value, which is
+worse. The fix was to first cut the line down to the part that's on the
+canvas, so the numbers are always small. `text_width` had the same problem
+(`attempt to multiply with overflow`) for enormous text scales.
+
+**Lesson:** think about how big your numbers can get. Use a bigger type, or
+`checked_mul` and friends, or keep the values small in the first place.
+
+### Floats round, in surprising places
+
+Three bugs came from floating-point rounding:
+
+- **The clock drifted.** `ctx.time()` added up each frame's `dt` in an
+  `f32`. An `f32` holds about 7 significant digits, so once the time reaches
+  thousands of seconds, adding 0.0167 gets rounded noticeably. After 4.6
+  hours the test got `time = 16626.293, expected 16666.666`: 40 seconds
+  behind. The fix keeps the total in an `f64`.
+- **`Rng::range(1.0, 2.0)` could return 2.0**, though its documentation
+  promised it never would. The biggest value from `next_f32` is
+  0.99999994, and `1.0 + 0.99999994` rounds to exactly `2.0`. So
+  `list[rng.range(0.0, len as f32) as usize]` could index past the end of
+  the list, about once in 16 million calls. That's the worst kind of bug:
+  almost impossible to reproduce. The fix steps down to the next float
+  below `max` with `f32::next_down`.
+- **Clipping needed `f64`.** To find where a line from x = -10,000,000,000
+  crosses a 20-pixel canvas, an `f32` isn't precise enough: all 20 pixels
+  round to the same spot. `clip_line` works in `f64`.
+
+**Lesson:** floats are approximations. Be careful with long-running sums
+and with values exactly at a boundary.
+
+### NaN spreads
+
+`world.step(f32::NAN)` made every body's position NaN ("not a number"),
+and a NaN never goes away: NaN plus anything is NaN. A line with a NaN end
+was drawn to (0, 0), because `NaN as i32` is 0. Both now check first:
+
+```rust
+if !(dt.is_finite() && dt > 0.0) {
+    return;
+}
+```
+
+**Lesson:** check numbers where they come *in* (function arguments, user
+input), before they can spread.
+
+### `clamp` can panic
+
+A physics body with a negative size crashed the whole game:
+
+```text
+min > max, or either was NaN. min = 10.0, max = -10.0
+```
+
+`f32::clamp(min, max)` panics if `min > max`, and a negative size made
+the limits come out backwards. Sizes are now made positive
+(`Shape::absolute`), and the clamping uses `max` then `min`, which can't
+panic.
+
+**Lesson:** read the "Panics" section in a function's documentation.
+Standard library functions list exactly when they panic.
+
+### Things that pile up
+
+Removing a physics body left an empty slot behind, forever, and every
+physics step walked every slot. A test that added and removed 10,000 balls
+found `10000 slots for 0 bodies`. In the sandbox, each shower of balls
+added 15 slots that never went away, so the longer you played, the slower
+it got. The fix reuses slots, with the generational ids from
+[chapter 4](#newtypes) so an old id can't reach the new body.
+
+**Lesson:** for anything a game adds and removes all the time, ask "does
+this grow forever?".
+
+### Other people's limits
+
+The GPU renderer had two crashes that only happen at the edges:
+
+- Drawing an empty mesh: `buffer slice can not be empty`. A GPU buffer
+  can't have zero bytes. Empty meshes are now skipped.
+- A canvas wider than the graphics card can draw (usually 8,192 or 16,384
+  pixels) failed wgpu's validation, a panic. Now the engine asks the card
+  for its limits, and falls back to the CPU if the canvas doesn't fit.
+
+**Lesson:** hardware, libraries and file formats all have limits. Find out
+what they are and check before you hit them. (The BMP screenshot writer
+learned the same lesson: BMP sizes are 32-bit, so an image over 4 GB now
+gives an error instead of a corrupt file.)
+
+### Programmer mistakes deserve clear messages
+
+A mesh whose triangle used a vertex that doesn't exist crashed with
+`index out of bounds: the len is 3 but the index is 7`. That's true, but
+it doesn't say which mesh or triangle. Now:
+
+```text
+triangle 1 uses vertex 7, but the mesh only has 3 vertices
+```
+
+Should that be a panic at all? Yes: a broken mesh is a bug in the game, not
+something to recover from. But the message should point straight at it.
+
+The same goes for settings: `Config { width: 0, ..Config::default() }` now
+gets `the canvas must be at least 1 x 1 pixels, not 0 x 240` from `run`,
+and the stress test refuses `--seconds NaN` (which would have run forever).
+
+### Fixes can have costs: measure them
+
+The clear message above cost speed. The CPU renderer's stress test dropped
+from 79 to 63 FPS. The panic message was built inside the hot loop that
+runs for every triangle, and that code got in the way of the compiler's
+optimizations. The fix moved the panic into its own function, marked
+`#[cold]`:
+
+```rust
+#[cold]
+#[inline(never)]
+fn bad_triangle(vertex_count: usize, index: usize, triangle: &Triangle) -> ! {
+```
+
+`#[cold]` tells the compiler "this almost never runs", so it arranges the
+code around the fast path. The `-> !` means the function never returns (it
+always panics). The review also noticed the renderer was computing the same
+`tan()` for every corner of every triangle, and now does it once per mesh.
+Together, the renderer was back to its old speed, 79 to 81 FPS.
+
+**Lesson:** after fixing something, run the benchmark again.
+
+## 25. Where to go next
 
 - **The Rust Programming Language** ("the Book"), free at
   <https://doc.rust-lang.org/book/>. The best way to learn Rust properly.

@@ -2,8 +2,8 @@
 
 A small game engine written in Rust, covering **2D graphics, 3D graphics
 (on the graphics card, or on the CPU) and physics**, plus six example
-programs. It was written to be read: about 4,600 lines of commented code
-(57 tests included). [minifb](https://crates.io/crates/minifb) opens the
+programs. It was written to be read: about 5,200 lines of commented engine
+code, and 82 tests. [minifb](https://crates.io/crates/minifb) opens the
 window and [wgpu](https://wgpu.rs) talks to the graphics card; everything
 else is written from scratch: drawing, text, both 3D renderers, the
 physics solver, input, and random numbers.
