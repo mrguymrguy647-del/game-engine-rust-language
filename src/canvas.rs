@@ -20,6 +20,10 @@ pub struct Canvas {
     width: usize,
     height: usize,
     pixels: Vec<u32>,
+    /// For 3D drawing: how close the nearest thing drawn at each pixel is,
+    /// stored as `1 / distance` (so bigger means closer, and 0.0 means nothing
+    /// has been drawn yet). This is called a *depth buffer* or *z-buffer*.
+    depth: Vec<f32>,
 }
 
 impl Canvas {
@@ -29,6 +33,7 @@ impl Canvas {
             width,
             height,
             pixels: vec![0; width * height],
+            depth: vec![0.0; width * height],
         }
     }
 
@@ -45,9 +50,11 @@ impl Canvas {
         &self.pixels
     }
 
-    /// Fills the whole canvas with one color.
+    /// Fills the whole canvas with one color. This also resets the depth
+    /// buffer, so call it at the start of every frame before drawing in 3D.
     pub fn clear(&mut self, color: Color) {
         self.pixels.fill(color.to_u32());
+        self.depth.fill(0.0);
     }
 
     /// Converts `(x, y)` into an index into `pixels`, or `None` if it is off-canvas.
@@ -148,6 +155,40 @@ impl Canvas {
         }
     }
 
+    /// Fills a triangle given its three corners, in any order.
+    pub fn fill_triangle(&mut self, a: Vec2, b: Vec2, c: Vec2, color: Color) {
+        let c32 = color.to_u32();
+        let pixels = &mut self.pixels;
+        for_each_pixel_in_triangle(self.width, self.height, [a, b, c], |i, _| {
+            pixels[i] = c32;
+        });
+    }
+
+    /// Fills a triangle for the 3D renderer. Each corner also has an
+    /// `inverse_depth` (1 / distance from the camera). A pixel is only drawn
+    /// if it's closer than whatever is already there, which is how objects in
+    /// front hide objects behind them.
+    pub(crate) fn fill_triangle_3d(
+        &mut self,
+        corners: [Vec2; 3],
+        inverse_depths: [f32; 3],
+        color: Color,
+    ) {
+        let c32 = color.to_u32();
+        // Borrow the two buffers separately, so the closure can change both.
+        let (pixels, depth) = (&mut self.pixels, &mut self.depth);
+        for_each_pixel_in_triangle(self.width, self.height, corners, |i, weights| {
+            // Blend the corners' depths by how close this pixel is to each corner.
+            let d = weights[0] * inverse_depths[0]
+                + weights[1] * inverse_depths[1]
+                + weights[2] * inverse_depths[2];
+            if d > depth[i] {
+                depth[i] = d;
+                pixels[i] = c32;
+            }
+        });
+    }
+
     /// Draws text with the built-in 3x5 pixel font. `pos` is the top-left
     /// corner; `scale` makes each font pixel a `scale` x `scale` square.
     /// A `'\n'` starts a new line.
@@ -241,6 +282,52 @@ impl Canvas {
     }
 }
 
+/// Calls `plot(index, weights)` for every pixel whose center is inside the
+/// triangle. `index` is the pixel's position in the pixel buffer, and
+/// `weights` says how much each corner "owns" that pixel (they add up to 1).
+///
+/// This uses *edge functions*: for each edge, a number that is positive on
+/// one side of the edge and negative on the other. A pixel is inside the
+/// triangle when it's on the inner side of all three edges.
+fn for_each_pixel_in_triangle(
+    width: usize,
+    height: usize,
+    [a, b, c]: [Vec2; 3],
+    mut plot: impl FnMut(usize, [f32; 3]),
+) {
+    // Twice the triangle's area. Its sign says whether the corners go clockwise or not.
+    let area = edge(a, b, c);
+    if area == 0.0 || !area.is_finite() {
+        return; // a flat sliver: nothing to fill
+    }
+
+    // Only look at pixels inside the triangle's bounding box (and the canvas).
+    let x0 = (a.x.min(b.x).min(c.x).floor().max(0.0)) as usize;
+    let y0 = (a.y.min(b.y).min(c.y).floor().max(0.0)) as usize;
+    let x1 = (a.x.max(b.x).max(c.x).ceil().max(0.0) as usize).min(width);
+    let y1 = (a.y.max(b.y).max(c.y).ceil().max(0.0) as usize).min(height);
+
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = vec2(x as f32 + 0.5, y as f32 + 0.5); // the pixel's center
+            let weights = [
+                edge(b, c, p) / area,
+                edge(c, a, p) / area,
+                edge(a, b, p) / area,
+            ];
+            if weights.iter().all(|&w| w >= 0.0) {
+                plot(y * width + x, weights);
+            }
+        }
+    }
+}
+
+/// Which side of the line from `a` to `b` is `p` on? Positive on one side,
+/// negative on the other, zero on the line. (It's a 2D cross product.)
+fn edge(a: Vec2, b: Vec2, p: Vec2) -> f32 {
+    (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +373,39 @@ mod tests {
 
         canvas.draw_line(vec2(0.0, 19.0), vec2(19.0, 19.0), Color::RED);
         assert!((0..20).all(|x| canvas.get_pixel(x, 19) == Some(Color::RED)));
+    }
+
+    #[test]
+    fn triangles_fill_either_winding() {
+        for corners in [
+            [vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(0.0, 10.0)],
+            [vec2(0.0, 0.0), vec2(0.0, 10.0), vec2(10.0, 0.0)],
+        ] {
+            let mut canvas = Canvas::new(10, 10);
+            let [a, b, c] = corners;
+            canvas.fill_triangle(a, b, c, Color::GREEN);
+            assert_eq!(canvas.get_pixel(1, 1), Some(Color::GREEN));
+            assert_eq!(canvas.get_pixel(9, 9), Some(Color::BLACK));
+        }
+        // Huge and degenerate triangles must not panic.
+        let mut canvas = Canvas::new(10, 10);
+        canvas.fill_triangle(vec2(-1e6, -1e6), vec2(1e6, 0.0), vec2(0.0, 1e6), Color::RED);
+        canvas.fill_triangle(vec2(1.0, 1.0), vec2(2.0, 2.0), vec2(3.0, 3.0), Color::RED);
+    }
+
+    #[test]
+    fn depth_test_keeps_the_nearest() {
+        let mut canvas = Canvas::new(10, 10);
+        canvas.clear(Color::BLACK);
+        let corners = [vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(0.0, 10.0)];
+        canvas.fill_triangle_3d(corners, [0.5; 3], Color::RED); // 2 units away
+        canvas.fill_triangle_3d(corners, [0.1; 3], Color::BLUE); // 10 units away: hidden
+        assert_eq!(canvas.get_pixel(1, 1), Some(Color::RED));
+        canvas.fill_triangle_3d(corners, [1.0; 3], Color::GREEN); // 1 unit away: in front
+        assert_eq!(canvas.get_pixel(1, 1), Some(Color::GREEN));
+        canvas.clear(Color::BLACK); // clearing resets depth too
+        canvas.fill_triangle_3d(corners, [0.1; 3], Color::BLUE);
+        assert_eq!(canvas.get_pixel(1, 1), Some(Color::BLUE));
     }
 
     #[test]

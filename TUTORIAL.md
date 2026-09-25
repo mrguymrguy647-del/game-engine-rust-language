@@ -1,8 +1,9 @@
 # Learn Rust by Building a Game Engine
 
-This guide teaches you Rust using the code in this repository: a small 2D
-game engine called **tiny_engine** and three games built on it. Every Rust
-concept is shown in real code that you can run, change and break.
+This guide teaches you Rust using the code in this repository: a small
+game engine called **tiny_engine**, which does 2D, 3D and physics, and five
+example programs built on it. Every Rust concept is shown in real code that
+you can run, change and break.
 
 - **Part 1** teaches the Rust language, one idea at a time.
 - **Part 2** explains how the engine works and why it's built that way.
@@ -33,13 +34,15 @@ Keep the source files open next to this guide. When you see a file like
   - [13. The game loop](#13-the-game-loop)
   - [14. Pixels and the framebuffer](#14-pixels-and-the-framebuffer)
   - [15. Drawing shapes and text](#15-drawing-shapes-and-text)
-  - [16. Keyboard input](#16-keyboard-input)
+  - [16. Keyboard and mouse](#16-keyboard-and-mouse)
   - [17. Random numbers](#17-random-numbers)
   - [18. Breakout, piece by piece](#18-breakout-piece-by-piece)
+  - [19. Physics](#19-physics)
+  - [20. 3D graphics](#20-3d-graphics)
 - **Part 3: Your turn**
-  - [19. Exercises](#19-exercises)
-  - [20. Common compiler errors](#20-common-compiler-errors)
-  - [21. Where to go next](#21-where-to-go-next)
+  - [21. Exercises](#21-exercises)
+  - [22. Common compiler errors](#22-common-compiler-errors)
+  - [23. Where to go next](#23-where-to-go-next)
 
 ---
 
@@ -60,14 +63,20 @@ newer; `rustc --version` tells you what you have.
 **Run the games** from the project folder:
 
 ```sh
-cargo run --example hello              # a square you move with the arrow keys
-cargo run --example shapes             # every drawing function, animated
-cargo run --release --example breakout # the full game
+cargo run --example hello      # a square you move with the keys or the mouse
+cargo run --example shapes     # every 2D drawing function, animated
+cargo run --example breakout   # the full Breakout game
+cargo run --example physics    # a 2D physics sandbox: click to drop things
+cargo run --example world3d    # a 3D world with physics: fly around, throw balls
 ```
 
 The first build takes a minute because Cargo downloads and compiles minifb
-and the crates it depends on. After that builds are fast. `--release` turns on optimizations;
-the game runs fine without it, but release builds are much faster.
+and the crates it depends on. After that, builds are fast. Adding
+`--release` gives fully optimized builds, but the project is set up so
+normal builds run smoothly too.
+
+Two keys work in every game: **F3** shows the frame rate (frames per
+second, or FPS), and **F12** saves a screenshot.
 
 **Cargo commands you'll use:**
 
@@ -84,20 +93,24 @@ the game runs fine without it, but release builds are much faster.
 **The project layout:**
 
 ```text
-Cargo.toml          project name, Rust edition, dependencies
+Cargo.toml          project name, Rust edition, dependencies, build settings
 src/
   lib.rs            the front door: lists the modules, defines the prelude
   engine.rs         the Game trait and the game loop (the only file that uses minifb)
-  canvas.rs         the pixel buffer and all drawing functions
+  canvas.rs         the pixel buffer: 2D drawing, triangles, the depth buffer
   font.rs           a tiny 3x5 pixel font
-  input.rs          keyboard state
-  math.rs           Vec2 and Rect
+  input.rs          keyboard and mouse
+  math.rs           Vec2, Rect, Vec3 and the Vector trait
   color.rs          Color
   rng.rs            random numbers
+  physics.rs        physics for 2D and 3D: gravity, bouncing, friction, stacking
+  render3d.rs       3D: cameras, meshes, transforms, lighting
 examples/
   hello.rs          the smallest game
-  shapes.rs         a tour of the drawing functions
-  breakout.rs       a complete game
+  shapes.rs         a tour of the 2D drawing functions
+  breakout.rs       a complete 2D game
+  physics.rs        a 2D physics sandbox
+  world3d.rs        a 3D playground with physics
 ```
 
 ---
@@ -114,10 +127,13 @@ name = "tiny_engine"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A small 2D game engine, written for learning Rust"
+description = "A small game engine (2D, 3D and physics), written for learning Rust"
 
 [dependencies]
 minifb = "0.28"
+
+[profile.dev]
+opt-level = 1
 ```
 
 - A Rust project is called a **crate**. This one is a *library crate*
@@ -130,6 +146,9 @@ minifb = "0.28"
   [crates.io](https://crates.io). We use exactly one: **minifb**, which opens
   a window, shows pixels and reports key presses. Everything else we write
   ourselves, because that's the point of the exercise.
+- `[profile.dev]` changes how normal (debug) builds are compiled.
+  `opt-level = 1` turns on light optimization, because code that touches
+  every pixel is very slow without any.
 
 Files in `examples/` are small programs that use the library. Each one
 starts with:
@@ -407,6 +426,44 @@ You can also pull a struct apart into variables. From `Canvas::draw_rect`:
 let Rect { x, y, w, h } = rect;
 ```
 
+### Builder methods: chaining settings
+
+The physics engine creates bodies like this:
+
+```rust
+let ball = Body::ball(vec2(160.0, 20.0), 8.0).with_bounce(0.6).with_friction(0.1);
+let wall = Body::block(vec2(0.0, 100.0), vec2(10.0, 200.0)).fixed();
+```
+
+Each `with_...` method takes the body **by value** (`mut self`), changes
+it, and hands it back:
+
+```rust
+pub fn with_bounce(mut self, bounce: f32) -> Self {
+    self.bounce = bounce;
+    self
+}
+```
+
+That's what lets the calls chain one after another. This is called the
+*builder pattern*: you mention only the settings you care about, and
+everything else keeps a sensible default.
+
+### Newtypes
+
+`PhysicsWorld::add` gives you back a `BodyId`, which is just a number in
+disguise:
+
+```rust
+pub struct BodyId(usize);
+```
+
+A struct with unnamed fields is a *tuple struct*. Wrapping a single value
+like this is called a **newtype**. Why not just return a `usize`? Because
+then you could accidentally pass a score or an array index where a body id
+belongs. As its own type, that mix-up won't compile. And because the field
+isn't `pub`, games can't make up fake ids either.
+
 ## 5. Enums and pattern matching
 
 An **enum** is a type whose value is exactly *one* of several variants.
@@ -457,16 +514,23 @@ This is great when a program grows: add a variant, then let the compiler
 show you every place that needs updating.
 
 To deliberately ignore the rest, use the `_` wildcard. `convert_key` in
-`src/engine.rs` handles 14 keys and ignores the other ~100:
+`src/engine.rs` translates the keys games can use and ignores the rest
+(like Num Lock):
 
 ```rust
+use minifb::Key as K;
+
 let key = match key {
-    minifb::Key::Left => Key::Left,
-    minifb::Key::Right => Key::Right,
+    K::A => Key::A,
+    K::B => Key::B,
     // ...
     _ => return None,
 };
 ```
+
+(`use minifb::Key as K;` imports minifb's `Key` under a short nickname,
+because our own type is *also* called `Key`. Without it, every one of the
+~65 lines would start with `minifb::Key::`.)
 
 `match` is also an expression that returns a value. From `draw_hud`:
 
@@ -716,14 +780,93 @@ and is called with `self.break_brick_under_ball(&mut ctx.rng)`. You can
 borrow one field of a struct on its own. Asking for less makes a function
 easier to understand and easier to call.
 
+### A real borrow error, from building this engine
+
+While writing the physics sandbox, I wrote this:
+
+```rust
+fn update(&mut self, ctx: &mut Context) {
+    let input = &ctx.input;
+    if input.was_pressed(Key::Escape) {
+        ctx.quit();
+    }
+    if input.was_pressed(Key::C) {
+        // ...
+    }
+}
+```
+
+and the compiler stopped me:
+
+```text
+error[E0502]: cannot borrow `*ctx` as mutable because it is also borrowed as immutable
+   |
+ 7 |         let input = &ctx.input;
+   |                     ---------- immutable borrow occurs here
+ 8 |         if input.was_pressed(Key::Escape) {
+ 9 |             ctx.quit();
+   |             ^^^^^^^^^^ mutable borrow occurs here
+10 |         }
+11 |         if input.was_pressed(Key::C) {
+   |            ----- immutable borrow later used here
+```
+
+`input` borrows part of `ctx`, and it's still in use on line 11, so from
+line 7 to line 11 `ctx` is being read. But `ctx.quit()` needs `&mut` access
+to *all* of `ctx`, which could change `ctx.input` while `input` is looking
+at it. The fix was to drop the `input` variable and write
+`ctx.input.was_pressed(...)` each time, so each borrow only lasts for its
+own line.
+
+Notice that the message points at *three* places: where the borrow starts,
+where the conflict is, and where the borrow is used later. Reading all
+three usually shows you the fix.
+
+### Two mutable borrows into one list
+
+The physics engine often needs to change two bodies at once (when they
+collide), and both live in the same `Vec`. The obvious code doesn't
+compile:
+
+```rust
+let a = &mut bodies[i];
+let b = &mut bodies[j];
+```
+
+```text
+error[E0499]: cannot borrow `bodies` as mutable more than once at a time
+  |     let a = &mut bodies[i];
+  |                  ------ first mutable borrow occurs here
+  |     let b = &mut bodies[j];
+  |                  ^^^^^^ second mutable borrow occurs here
+  = help: use `.split_at_mut(position)` to obtain two mutable non-overlapping sub-slices
+```
+
+Even when `i` and `j` are different, the compiler only sees two `&mut`
+borrows of `bodies`. And it tells you the fix: `split_at_mut` cuts a slice
+into two halves that *can't* overlap. From `src/physics.rs`:
+
+```rust
+fn pair_mut<V>(bodies: &mut [Option<Body<V>>], i: usize, j: usize) -> (&mut Body<V>, &mut Body<V>) {
+    assert!(i < j);
+    let (left, right) = bodies.split_at_mut(j);
+    let a = left[i].as_mut().expect("contact refers to a removed body");
+    let b = right[0].as_mut().expect("contact refers to a removed body");
+    (a, b)
+}
+```
+
+`left` holds items `0..j` and `right` holds `j..`, so `bodies[j]` is
+`right[0]`.
+
 ### `std::mem::take`
 
 Sometimes you want to move a value *out* of something you only have a
-`&mut` to. `Input::begin_frame` does this:
+`&mut` to. `ButtonState::begin_frame` in `src/input.rs` does this:
 
 ```rust
 self.down_last_frame = std::mem::take(&mut self.down);
-self.down.extend(keys_down);
+self.down.extend(held);
 ```
 
 `mem::take` moves the set out of `self.down` and leaves an empty set
@@ -782,8 +925,17 @@ let pixels = vec![0; width * height];                      // `width * height` z
 self.pixels[i] = color.to_u32();                           // index (panics if out of range)
 ```
 
-`Input` uses a `HashSet<Key>`, a collection with no duplicates and a fast
-`contains` check, which is exactly what "which keys are held?" needs.
+`Input` keeps the held keys in a `HashSet`, a collection with no duplicates
+and a fast `contains` check, which is exactly what "which keys are held?"
+needs.
+
+The examples use two more collections from `std::collections`:
+
+- `HashMap<K, V>` looks up a value by a key. The 3D playground uses one to
+  remember how each physics body should be drawn (`BodyId` to `Look`).
+- `VecDeque<T>` is a list that's fast to change at *both* ends. The physics
+  sandbox adds new balls at the back and, when there are too many, removes
+  the oldest from the front.
 
 ### Loops
 
@@ -902,6 +1054,74 @@ Both work.
 a screenshot, it writes to a file. In the test, it writes to a `Vec<u8>` in
 memory, so the test can check the bytes without touching the disk.
 
+### Generic types: one physics engine for 2D and 3D
+
+Structs can be generic too, not just functions. The physics engine has to
+work with `Vec2` in 2D games and with `Vec3` in 3D ones. Instead of writing
+it twice, it's written once for "any vector type `V`":
+
+```rust
+pub struct PhysicsWorld<V> {
+    pub gravity: V,
+    bodies: Vec<Option<Body<V>>>,
+    contacts: Vec<Contact<V>>,
+}
+```
+
+But the physics code has to *do* things with `V`: add vectors, take dot
+products, read the x component. So `src/math.rs` defines a trait that says
+what a vector can do:
+
+```rust
+pub trait Vector:
+    Copy
+    + Debug
+    + Default
+    + PartialEq
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<f32, Output = Self>
+    + Neg<Output = Self>
+    + AddAssign
+    + SubAssign
+{
+    const DIMENSIONS: usize;
+
+    fn get(self, axis: usize) -> f32;
+    fn with(self, axis: usize, value: f32) -> Self;
+    fn dot(self, other: Self) -> f32;
+
+    fn unit(axis: usize) -> Self {
+        Self::default().with(axis, 1.0)
+    }
+}
+```
+
+Four new ideas in one place:
+
+- **Supertraits.** The list after `Vector:` means "to be a `Vector`, a type
+  must *also* implement all of these". So code that has a `V: Vector` can
+  use `+`, `-` and `* 2.0` on it.
+- **Associated constants.** Each type fills in `DIMENSIONS`: 2 or 3. The
+  box collision test loops `for axis in 0..V::DIMENSIONS`, so the same loop
+  checks 2 axes in 2D and 3 axes in 3D.
+- **Default methods.** `unit` has a body, so every implementor gets it for free.
+- **`impl<V: Vector>`.** The methods are written
+  `impl<V: Vector> PhysicsWorld<V> { ... }`: "for any `V` that is a `Vector`".
+
+And you rarely have to write `V` yourself, because Rust works it out from
+the gravity you pass in:
+
+```rust
+let world_2d = PhysicsWorld::new(vec2(0.0, 500.0));     // a PhysicsWorld<Vec2>
+let world_3d = PhysicsWorld::new(vec3(0.0, -9.8, 0.0)); // a PhysicsWorld<Vec3>
+```
+
+`src/input.rs` uses the same idea on a smaller scale. `ButtonState<T>`
+tracks "held this frame / held last frame" for any kind of button, and
+`Input` has one for keys (`ButtonState<Key>`) and one for mouse buttons
+(`ButtonState<MouseButton>`).
+
 ### Operator overloading
 
 Implementing standard library traits lets your types work with operators.
@@ -986,6 +1206,8 @@ pub mod color;
 pub mod engine;
 pub mod input;
 pub mod math;
+pub mod physics;
+pub mod render3d;
 pub mod rng;
 
 // Not `pub`: the font is an internal detail of `Canvas::draw_text`.
@@ -1021,14 +1243,36 @@ pub mod prelude {
     pub use crate::canvas::Canvas;
     pub use crate::color::Color;
     pub use crate::engine::{Config, Context, Game};
-    pub use crate::input::{Input, Key};
-    pub use crate::math::{Rect, Vec2, vec2};
+    pub use crate::input::{Input, Key, MouseButton};
+    pub use crate::math::{Rect, Vec2, Vec3, vec2, vec3};
+    pub use crate::render3d::{Camera3D, Mesh, Transform};
     pub use crate::rng::Rng;
 }
 ```
 
 `pub use` re-exports a name, so `use tiny_engine::prelude::*;` brings all of
-them in at once. Many Rust libraries do this.
+them in at once. Many Rust libraries do this. (The physics types aren't in
+the prelude, so games that use physics also write
+`use tiny_engine::physics::{Body, PhysicsWorld};`.)
+
+### One type, several files
+
+`Canvas` is defined in `src/canvas.rs`, but its `draw_mesh` method lives in
+`src/render3d.rs`:
+
+```rust
+impl Canvas {
+    pub fn draw_mesh(&mut self, mesh: &Mesh, transform: &Transform, camera: &Camera3D) {
+        // ...
+    }
+}
+```
+
+A type can have any number of `impl` blocks, in any module of the same
+crate. That keeps all the 3D code in one file, while games still simply
+write `canvas.draw_mesh(...)`. `draw_mesh` needs the canvas's private depth
+buffer, so `canvas.rs` offers `fill_triangle_3d` as `pub(crate)`: usable
+from `render3d.rs`, invisible to games.
 
 ## 10. Error handling
 
@@ -1036,7 +1280,10 @@ Rust has two kinds of errors.
 
 **Unrecoverable errors: `panic!`.** A bug that should never happen, like an
 out-of-range index, stops the program with a message. Integer overflow
-panics too in debug builds. So does `.unwrap()` on a `None`.
+panics too in debug builds. So does `.unwrap()` on a `None`. The physics
+engine panics on purpose if you call `.with_mass(0.0)`: a zero mass is a
+bug in the calling code, and a clear message right away beats strange
+behavior later.
 
 **Recoverable errors: `Result`.** When something can fail for reasons
 outside your control (no display, disk full), a function returns:
@@ -1170,36 +1417,42 @@ you fix a bug, try writing a test that would have caught it.
 ## 12. The big picture
 
 ```text
-   examples/breakout.rs      (your game: implements `Game`, calls `run`)
+   examples/*.rs      (your game: implements `Game`, calls `run`)
             |
             v
-+----------------------- tiny_engine ------------------------+
-|  engine.rs   run(): the game loop, Context, Config         |
-|              <- the ONLY file that knows minifb exists     |
-|                                                            |
-|  canvas.rs   pixels + drawing  ---uses--->  font.rs        |
-|  input.rs    which keys are down / pressed / released      |
-|  math.rs     Vec2, Rect         color.rs    rng.rs         |
-+------------------------------------------------------------+
++------------------------- tiny_engine --------------------------+
+|  engine.rs    run(): the game loop, Context, Config            |
+|               <- the ONLY file that knows minifb exists        |
+|                                                                |
+|  canvas.rs    pixels, 2D drawing, triangles, depth buffer      |
+|  font.rs      the pixel font that canvas.rs draws text with    |
+|  render3d.rs  3D: camera, meshes, lighting (draws on canvas)   |
+|  physics.rs   bodies, collisions, bouncing (2D and 3D)         |
+|  input.rs     keyboard and mouse                               |
+|  math.rs      Vec2, Rect, Vec3, Vector    color.rs    rng.rs   |
++----------------------------------------------------------------+
             |
             v
-        minifb     (opens the window, shows pixels, reports keys)
+        minifb     (opens the window, shows pixels, reports keys and mouse)
             |
             v
      Windows / macOS / Linux
 ```
 
-Three design decisions shape everything:
+Four design decisions shape everything:
 
 1. **A trait is the contract between engine and game.** The engine calls
    `update` and `draw`; the game never has to know how windows work.
 2. **Only one file touches the window library.** Games use our own `Key`
    type, not minifb's. To switch to another library (like SDL2 or winit),
    you'd rewrite `engine.rs` and nothing else.
-3. **The engine draws every pixel itself.** No GPU and no graphics API,
-   just a `Vec<u32>`. That's slower than a GPU, but a 320x240 screen is only
-   76,800 pixels and modern CPUs don't break a sweat. And you can
-   understand every line.
+3. **The engine draws every pixel itself, even in 3D.** No GPU and no
+   graphics API, just a `Vec<u32>`. That's slower than a GPU, but a 320x240
+   screen is only 76,800 pixels and modern CPUs don't break a sweat. And you
+   can understand every line.
+4. **Physics and drawing don't know about each other.** The physics world
+   only moves bodies around; the game draws each body wherever the physics
+   put it. You can use either without the other.
 
 ## 13. The game loop
 
@@ -1210,22 +1463,29 @@ runs once per frame. Here's ours, from `run` in `src/engine.rs`:
 while window.is_open() && !ctx.quit_requested {
     // 1. Time.
     let now = Instant::now();
-    let dt = now.duration_since(last_frame).as_secs_f32().min(MAX_DT);
+    let real_dt = now.duration_since(last_frame).as_secs_f32();
     last_frame = now;
 
-    // 2. Input: translate the window library's keys into our own `Key`s.
+    // 2. Input: translate the window library's keys and buttons into our own types.
     let keys = window.get_keys().into_iter().filter_map(convert_key);
-    ctx.begin_frame(dt, keys);
+    ctx.begin_frame(real_dt, keys);
+    read_mouse(&window, &canvas, &mut ctx.input);
 
     // 3 + 4. The game's turn.
     game.update(&mut ctx);
     game.draw(&mut canvas);
 
+    if ctx.input.was_pressed(Key::F3) {
+        show_fps = !show_fps;
+    }
+    if show_fps {
+        draw_fps(&mut canvas, ctx.fps());
+    }
     if ctx.input.was_pressed(Key::F12) {
         save_screenshot(&canvas);
     }
 
-    // 5. Show the frame. This also collects new keyboard events from the OS.
+    // 5. Show the frame. This also collects new keyboard and mouse events from the OS.
     window.update_with_buffer(canvas.pixels(), canvas.width(), canvas.height())?;
 }
 ```
@@ -1261,7 +1521,9 @@ If the game freezes for half a second (you're dragging the window, say),
 the next `dt` would be 0.5, and a ball moving 280 px/s would jump 140
 pixels in one step, straight through the paddle. This is called
 **tunneling**. Capping `dt` means the game briefly runs in slow motion
-instead, which players barely notice.
+instead, which players barely notice. (`Context::begin_frame` applies the
+cap with `self.dt = real_dt.min(MAX_DT);`. The FPS counter uses the real,
+uncapped time.)
 
 ### Frame pacing
 
@@ -1364,6 +1626,25 @@ the drawn pixels have drifted from the true line. When the error gets too
 big it takes a step sideways. It uses only integer addition, which mattered
 a lot on 1960s hardware.
 
+### Triangles
+
+`fill_triangle` matters most of all, because everything in 3D is made of
+triangles. It uses **edge functions**. For the edge from `a` to `b`, this
+number is positive for points on one side of the line and negative on the
+other:
+
+```rust
+fn edge(a: Vec2, b: Vec2, p: Vec2) -> f32 {
+    (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+}
+```
+
+A pixel is inside the triangle when it's on the inner side of all three
+edges. Better still, the three edge values divided by the triangle's area
+say how close the pixel is to each corner. The 3D renderer uses these
+*weights* to blend the corners' depths across the triangle (see
+[chapter 20](#20-3d-graphics)).
+
 ### Text
 
 `src/font.rs` stores each character as five rows of three bits:
@@ -1401,7 +1682,7 @@ significant byte first), which is what the format requires. Our
 `0x00RRGGBB` pixels, written little-endian, come out as the bytes B, G, R,
 0, which is exactly BMP's order.
 
-## 16. Keyboard input
+## 16. Keyboard and mouse
 
 Games ask two different questions about keys:
 
@@ -1411,11 +1692,12 @@ Games ask two different questions about keys:
   launch 30 times. → `was_pressed`
 
 The OS only tells us which keys are down *right now*. To detect presses,
-`Input` also remembers last frame's keys and compares:
+`Input` also remembers last frame's keys and compares. This lives in the
+generic `ButtonState<T>`, so the mouse buttons get it too:
 
 ```rust
-pub fn was_pressed(&self, key: Key) -> bool {
-    self.down.contains(&key) && !self.down_last_frame.contains(&key)
+fn was_pressed(&self, button: T) -> bool {
+    self.down.contains(&button) && !self.down_last_frame.contains(&button)
 }
 ```
 
@@ -1434,6 +1716,44 @@ number between -1.0 and 1.0, which makes movement code short:
 ```rust
 let direction = ctx.input.axis(Key::Left, Key::Right) + ctx.input.axis(Key::A, Key::D);
 ```
+
+### The mouse
+
+The mouse works the same way: `is_mouse_down`, `was_mouse_pressed` and
+`was_mouse_released` for the buttons, plus `mouse_position()`,
+`mouse_delta()` (how far it moved this frame, which the 3D camera uses to
+look around) and `scroll()`.
+
+The tricky part is the position. The OS reports the pointer in *window*
+pixels, but games draw in *canvas* pixels. The canvas is scaled up to fit
+the window and centered, with black bars if their shapes don't match:
+
+```text
+   a 1200 x 720 window
+  +-------+--------------------------------+-------+
+  |  bar  |   canvas: 320 x 240,           |  bar  |
+  |  120  |   scaled 3x to 960 x 720       |  120  |
+  +-------+--------------------------------+-------+
+```
+
+`window_to_canvas` in `src/engine.rs` undoes the centering, then the scaling:
+
+```rust
+let scale = (window_w / canvas_w).min(window_h / canvas_h);
+let offset_x = (window_w - canvas_w * scale) / 2.0;
+let offset_y = (window_h - canvas_h * scale) / 2.0;
+Some(vec2(
+    (mouse.0 - offset_x) / scale,
+    (mouse.1 - offset_y) / scale,
+))
+```
+
+So a click at window pixel (120, 0) lands on canvas pixel (0, 0), and there's
+a test for exactly that case.
+
+Different systems report different amounts per scroll-wheel click (Linux
+says 1, Windows says 12), so `scroll()` boils it down to just the direction:
+`1.0`, `-1.0` or `0.0`.
 
 ## 17. Random numbers
 
@@ -1593,11 +1913,314 @@ canvas (it's called the *painter's algorithm*).
 points to", so this replaces the entire game with a fresh one. The old
 bricks, particles and score are freed automatically.
 
+## 19. Physics
+
+`src/physics.rs` makes things fall, bounce, slide and stack. Run
+`cargo run --example physics` and play with it, then read along.
+
+### Using it
+
+```rust
+use tiny_engine::physics::{Body, PhysicsWorld};
+
+let mut world = PhysicsWorld::new(vec2(0.0, 500.0)); // gravity: 500 px/s², downward
+world.add(Body::block(vec2(160.0, 230.0), vec2(320.0, 20.0)).fixed()); // the floor
+let ball = world.add(Body::ball(vec2(160.0, 20.0), 8.0).with_bounce(0.6));
+
+// Then, every frame:
+world.step(ctx.dt());
+let position = world.get(ball).unwrap().position; // draw the ball here
+```
+
+A **body** has a position, a velocity, a shape (`Ball` or `Block`), a
+bounciness, a friction and a mass. A **fixed** body never moves on its
+own. Use it for floors, walls and pegs. The world doesn't draw anything:
+your game draws each body wherever the physics says it is. That's what
+`draw` in `examples/physics.rs` does.
+
+**The units are up to you.** The 2D sandbox works in pixels (gravity 400
+px/s², y down), and the 3D playground works in meters (gravity 9.8 m/s², y up).
+The physics code doesn't care.
+
+### One step at a time
+
+Each `step` is split into 4 *substeps* (smaller steps are more accurate).
+Each substep does five things:
+
+1. **Gravity** speeds up every body: `velocity += gravity * h`.
+2. **Collision detection** finds every pair of overlapping bodies. Each
+   overlap becomes a *contact*: which way to push (the *normal*) and how
+   deep the overlap is.
+3. **The solver** changes velocities so touching bodies stop moving into
+   each other.
+4. **Integration** moves everything: `position += velocity * h`.
+5. **Separation** pushes apart anything that still overlaps.
+
+Updating the velocity first, and *then* moving with the new velocity, is
+called *semi-implicit Euler integration*. It's simple and surprisingly
+stable, which is why most game physics engines use it.
+
+### Detecting collisions
+
+There are three pairs of shapes, so three tests:
+
+- **Ball vs ball:** they overlap when the distance between their centers
+  is less than their two radii added together:
+
+  ```rust
+  let offset = b - a;
+  let distance_squared = offset.dot(offset);
+  let reach = radius_a + radius_b;
+  if distance_squared >= reach * reach {
+      return None;
+  }
+  ```
+
+  Comparing *squared* distances skips a slow square root in the common case
+  where nothing touches.
+- **Box vs box:** two boxes overlap only if they overlap along *every*
+  axis. They're pushed apart along the axis where they overlap *least*,
+  which is the shortest way out.
+- **Ball vs box:** find the point of the box nearest to the ball's center
+  (clamp the center's coordinates to the box), then do a ball-style
+  distance test against that point.
+
+Checking every pair of bodies means about 20,000 checks for 200 bodies.
+That's fine here, but big engines first throw away far-apart pairs with a
+cheap *broad phase* (a grid, for example).
+
+### Impulses: the solver
+
+When two bodies collide, the solver applies an **impulse**, an instant
+push. The same push changes a light body's velocity more than a heavy
+one's: `velocity change = impulse / mass`. That's why the engine stores
+`inverse_mass = 1 / mass`. A fixed body gets `0.0`, meaning "infinitely
+heavy", and every formula just works:
+
+```rust
+let speed = (b.velocity - a.velocity).dot(n);
+let impulse = (contact.target_speed - speed) / total_inverse_mass;
+// Contacts can push but never pull, so the *total* impulse can't go below 0.
+let new_total = (contact.normal_impulse + impulse).max(0.0);
+let impulse = new_total - contact.normal_impulse;
+contact.normal_impulse = new_total;
+a.velocity -= n * (impulse * a.inverse_mass);
+b.velocity += n * (impulse * b.inverse_mass);
+```
+
+- `speed` is how fast the bodies are separating along the normal (negative
+  means approaching).
+- `target_speed` is how fast they *should* separate: the approach speed
+  times `bounce` for a real hit, and `0` for things at rest. (Without that
+  second case, a ball on the floor would keep making tiny bounces forever.)
+- **Bounce:** with `0.8`, a ball comes back at 80% of its speed and reaches
+  `0.8 x 0.8 = 64%` of the height. A test checks exactly that.
+- **Friction** works the same way, but along the surface instead of along
+  the normal. It can never be stronger than
+  `friction x how hard the bodies press together` (Coulomb's law of
+  friction), which is why a heavy box is harder to slide.
+
+Fixing one contact can disturb its neighbors (think of a stack of boxes),
+so the solver goes over all the contacts 8 times, getting closer to the
+right answer each time. This method is called **sequential impulses**, and
+it's how Box2D works, the 2D physics engine behind Angry Birds.
+
+### Reacting to collisions
+
+After each step, `world.contacts()` lists every pair that touched, and
+`world.touching(a, b)` checks a single pair. The sandbox uses this to light
+up the pegs:
+
+```rust
+for contact in self.world.contacts() {
+    for id in [contact.a, contact.b] {
+        if self.pegs.contains(&id) {
+            self.glow.insert(id, GLOW_TIME);
+        }
+    }
+}
+```
+
+It's the same idea for "did the player land on the ground?" or "did the
+ball reach the goal?".
+
+### Limits
+
+To keep the code readable, boxes never rotate (they're *axis-aligned*). So
+a box can balance on a single peg, which a real one wouldn't. Rotation needs
+angular velocity, moments of inertia and a much harder box-vs-box test. If
+you want to go there, *Box2D-lite* by Erin Catto is a famously clear small
+engine to read.
+
+## 20. 3D graphics
+
+All the 3D code is in `src/render3d.rs`, and it all ends up as triangles on
+the same canvas the 2D drawing uses. Run `cargo run --example world3d` and
+fly around first.
+
+### Directions
+
+In 3D, the engine uses **x = right, y = up, z = forward** (into the
+screen). Careful: *y points up* in 3D but *down* in 2D screen coordinates.
+
+### From a 3D point to a pixel
+
+Every corner of every triangle goes through four steps:
+
+1. **Model to world.** A `Transform` scales, rotates and moves a mesh into
+   place: `Transform::at(position).sized(2.0)`.
+2. **World to camera.** Shift everything so the camera sits at (0, 0, 0),
+   then undo the camera's rotation, so it's looking straight along +z:
+
+   ```rust
+   pub fn to_camera_space(&self, point: Vec3) -> Vec3 {
+       (point - self.position)
+           .rotate_y(-self.yaw)
+           .rotate_x(-self.pitch)
+   }
+   ```
+
+3. **Projection.** Divide by the distance, `z`:
+
+   ```rust
+   vec2(
+       width / 2.0 + p.x / p.z * focal_length,
+       height / 2.0 - p.y / p.z * focal_length, // minus: screen y points down
+   )
+   ```
+
+   Something twice as far away is drawn half as big: that's all perspective
+   is. `focal_length` comes from the camera's field of view. A narrower
+   view gives a bigger number, which zooms in.
+4. **Rasterization.** Fill the triangle's pixels with `fill_triangle_3d`,
+   checking depth as it goes.
+
+### Which way is a triangle facing?
+
+The **cross product** of two edges of a triangle gives a vector sticking
+straight out of it, called its *normal*:
+
+```rust
+let normal = (b - a).cross(c - a).normalized();
+```
+
+Which side it sticks out of depends on the order of the corners. The rule
+in this engine: **corners go clockwise when you look at the front**. That
+makes two tricks possible:
+
+- **Back-face culling.** If the normal points away from the camera, we're
+  looking at the back of the triangle (the inside of a solid object), so
+  it's skipped. That halves the work.
+
+  ```rust
+  if normal.dot(a - camera.position) >= 0.0 {
+      continue;
+  }
+  ```
+
+- **Lighting.** The **dot product** of the normal and the direction to the
+  sun is 1 when the triangle faces the sun head-on, and 0 when it's edge-on:
+
+  ```rust
+  let sunlight = normal.dot(sun).max(0.0);
+  let brightness = AMBIENT_LIGHT + (1.0 - AMBIENT_LIGHT) * sunlight;
+  ```
+
+  `AMBIENT_LIGHT` stops the shaded sides going pitch black. Using one
+  brightness for the whole triangle is called *flat shading*. It gives the
+  faceted look.
+
+A test checks that every triangle of every built-in mesh faces outward.
+Get one backwards and it would be invisible from outside.
+
+### The depth buffer
+
+When two triangles cover the same pixel, the nearer one should win.
+Drawing everything from far to near would work for simple scenes, but it
+fails when triangles overlap in complicated ways. The standard answer is
+a **depth buffer**: a second array with one number per pixel, holding the
+distance of whatever was drawn there. A new pixel is only drawn if it's
+closer:
+
+```rust
+if d > depth[i] {
+    depth[i] = d;
+    pixels[i] = c32;
+}
+```
+
+It stores `1 / distance` instead of the distance, because `1 / distance`
+changes *evenly* across a triangle on screen. So blending the three corners'
+values with the triangle weights from [chapter 15](#triangles) gives exactly
+the right answer. Bigger means closer, and `canvas.clear()` resets every
+pixel to `0.0` ("nothing here yet").
+
+The test `draws_cubes_with_near_ones_in_front` draws a near cube *first*
+and a bigger, far cube *second*, and checks that the near one still ends up
+in front.
+
+### Clipping: things behind you
+
+Projection divides by `z`. Behind the camera `z` is negative and the math
+produces garbage, and at exactly `0` it divides by zero. So before
+projecting, each triangle is **clipped** against a plane just in front of
+the camera (`z = 0.05`), and any part behind it is cut off. Cutting one
+corner off a triangle leaves a four-sided shape, which is drawn as two
+triangles. Without clipping, the floor (which is always partly behind you)
+would glitch or vanish.
+
+### Meshes
+
+A `Mesh` is a list of corner points (`vertices`) plus a list of `Triangle`s
+that refer to corners by index, so corners shared by several triangles are
+stored once. The built-in meshes (`cube`, `pyramid`, `sphere`,
+`checkerboard`) are all 1 unit big, so a transform's scale *is* the
+object's size. You can also build your own. `examples/world3d.rs` builds the
+shadow disc from one center point and a ring of points around it:
+
+```rust
+let center = mesh.add_vertex(Vec3::ZERO);
+```
+
+and one triangle per slice:
+
+```rust
+mesh.add_triangle(center, ring[next], ring[i], color);
+```
+
+### How the 3D playground uses physics
+
+`examples/world3d.rs` runs a `PhysicsWorld<Vec3>`, and each frame it draws
+a mesh at every body's position:
+
+```rust
+(Look::Ball(color), Shape::Ball { radius }) => (
+    &self.ball_meshes[color],
+    Transform::at(body.position).sized(radius * 2.0),
+),
+```
+
+It also uses two classic cheap tricks:
+
+- **Blob shadows.** A dark disc on the ground under each object, smaller the
+  higher up it is. Real shadows are much harder!
+- **Endless ground.** `world_to_screen` finds where the horizon is on
+  screen, and everything below it is painted grass-colored before the
+  checkerboard is drawn. So the world doesn't seem to end in mid-air.
+
+### Why not the graphics card?
+
+Real 3D engines send triangles to the GPU, which runs these same steps
+(transform, clip, cull, rasterize, depth test) in hardware, on millions of
+triangles per frame. This CPU version manages a few thousand at 320x240.
+But it's the same pipeline, and now you know what's inside it. When you
+want more, look at the `wgpu` crate, or at an engine like Bevy.
+
 ---
 
 # Part 3: Your turn
 
-## 19. Exercises
+## 21. Exercises
 
 Do them in order. After each change, run the game and see what happened.
 When the compiler complains, **read the whole error message**: Rust's error
@@ -1628,18 +2251,17 @@ messages are unusually helpful, and often include the fix.
 7. **Hello, in color.** In `examples/hello.rs`, make the square change color
    while Space is held. Then make it leave a trail: store the last 20
    positions in a `Vec<Vec2>` and draw them fading out.
-8. **A new key.** Add `Key::M` to the engine: add it to the `Key` enum in
-   `src/input.rs` and to `convert_key` in `src/engine.rs`. Use it to toggle
-   something in a game.
+8. **Follow the mouse.** In `examples/hello.rs`, make the square glide
+   towards the mouse while the left button is held, instead of teleporting.
+   (Hint: the direction is `(target - position).normalized()`.)
 
 ### Engine features
 
 9. **Screen shake.** When a brick breaks, shake the screen for 0.2 seconds.
    Hint: add a `camera_offset: Vec2` field to `Canvas` that every drawing
    function adds to positions, and set it randomly each frame while shaking.
-10. **Mouse support.** minifb has `window.get_mouse_pos(MouseMode::Clamp)`.
-    Add a `mouse_position: Vec2` to `Input` (remember the canvas is scaled!)
-    and let Breakout's paddle follow the mouse.
+10. **Mouse paddle.** Let Breakout's paddle follow
+    `ctx.input.mouse_position().x`, and keep the keyboard working too.
 11. **Sprites.** Draw small pictures stored in the code, like the font:
     ```rust
     const INVADER: [&str; 4] = [
@@ -1652,6 +2274,24 @@ messages are unusually helpful, and often include the fix.
     Write `Canvas::draw_sprite(&mut self, sprite: &[&str], pos: Vec2, scale: u32, color: Color)`.
 12. **Fixed timestep.** Change `run` to update in fixed steps of 1/60 s.
     Watch out: what should `was_pressed` do if two updates run in one frame?
+
+### Physics and 3D
+
+13. **Explosions.** In the physics sandbox, make X push every body away
+    from the mouse, harder the closer it is. Collect the ids first, then
+    call `get_mut` and `apply_impulse` on each. (Why can't you change the
+    bodies while looping over `world.bodies()`?)
+14. **Tilt the world.** `world.gravity` is a public field. Let the arrow
+    keys change which way things fall.
+15. **A moving platform.** Add a fixed block to the sandbox and give it a
+    velocity that flips direction every 2 seconds. Fixed bodies still move
+    by their velocity, and friction carries whatever sits on top.
+16. **A snowman.** In the 3D playground, stack three white spheres of
+    different sizes, then give it a small orange pyramid for a nose.
+17. **Fog.** Add a `fog: Option<Color>` field to `Camera3D`. In
+    `draw_mesh`, blend each triangle's color towards it the further away it
+    is: `color.lerp(fog, (distance / 25.0).min(1.0))`. Fading into the
+    distance makes a 3D scene look much deeper.
 
 ### New games
 
@@ -1684,16 +2324,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-13. **Pong.** Two paddles (W/S and Up/Down), one ball, a score for each
+18. **Pong.** Two paddles (W/S and Up/Down), one ball, a score for each
     side. You can reuse a lot of Breakout.
-14. **Snake.** Use a grid: 16x16 pixel cells give a 20x15 board. The snake
+19. **Snake.** Use a grid: 16x16 pixel cells give a 20x15 board. The snake
     is a `VecDeque<(i32, i32)>` (from `std::collections`): push a new head,
     pop the tail. Move only every 0.1 s by adding up `dt` in a timer. Place
     food with `ctx.rng.range_i32(0, 20)`. Use an enum for the direction.
-15. **Space invaders.** A ship, bullets in a `Vec`, rows of aliens that
-    march sideways and step down. Uses everything in this guide.
+20. **Space invaders.** A ship, bullets in a `Vec`, rows of aliens that
+    march sideways and step down.
+21. **A 3D game.** A marble you steer with the arrow keys (apply impulses
+    to a ball body) across floating platforms, with the camera following
+    it. Or 3D Breakout, with a `PhysicsWorld<Vec3>`.
 
-## 20. Common compiler errors
+## 22. Common compiler errors
 
 | Error    | Message (short)                                   | Usually means                                                 |
 |----------|---------------------------------------------------|---------------------------------------------------------------|
@@ -1708,7 +2351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For a long explanation of any error, run `rustc --explain E0502`.
 
-## 21. Where to go next
+## 23. Where to go next
 
 - **The Rust Programming Language** ("the Book"), free at
   <https://doc.rust-lang.org/book/>. The best way to learn Rust properly.
@@ -1718,6 +2361,11 @@ For a long explanation of any error, run `rustc --explain E0502`.
 - **Rust by Example**: <https://doc.rust-lang.org/rust-by-example/>.
 - **`cargo doc --open`** in this project shows the engine's documentation,
   with links to the standard library.
+- **Physics:** *Box2D-lite* and the GDC talks by Erin Catto explain the
+  sequential impulses used in `src/physics.rs`.
+- **3D rendering:** [tinyrenderer](https://github.com/ssloy/tinyrenderer) and
+  [Scratchapixel](https://www.scratchapixel.com) build a software renderer
+  step by step, like `src/render3d.rs` but with textures and smooth shading.
 - **Real Rust game engines**, now that you know what's under the hood:
   - [macroquad](https://macroquad.rs): simple, and similar in spirit to this engine, but GPU-powered.
   - [Bevy](https://bevyengine.org): a big, modern engine built around an *Entity Component System*.

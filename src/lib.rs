@@ -34,6 +34,8 @@ pub mod color;
 pub mod engine;
 pub mod input;
 pub mod math;
+pub mod physics;
+pub mod render3d;
 pub mod rng;
 
 // Not `pub`: the font is an internal detail of `Canvas::draw_text`.
@@ -47,7 +49,8 @@ pub mod prelude {
     pub use crate::canvas::Canvas;
     pub use crate::color::Color;
     pub use crate::engine::{Config, Context, Game};
-    pub use crate::input::{Input, Key};
-    pub use crate::math::{Rect, Vec2, vec2};
+    pub use crate::input::{Input, Key, MouseButton};
+    pub use crate::math::{Rect, Vec2, Vec3, vec2, vec3};
+    pub use crate::render3d::{Camera3D, Mesh, Transform};
     pub use crate::rng::Rng;
 }

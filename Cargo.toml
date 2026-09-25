@@ -3,7 +3,12 @@ name = "tiny_engine"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A small 2D game engine, written for learning Rust"
+description = "A small game engine (2D, 3D and physics), written for learning Rust"
 
 [dependencies]
 minifb = "0.28"
+
+# Optimize a little even in debug builds, so games run smoothly with a
+# plain `cargo run` (the default debug build is very slow for pixel work).
+[profile.dev]
+opt-level = 1

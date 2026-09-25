@@ -1,7 +1,7 @@
 //! The smallest useful tiny_engine program: a square you can move around.
 //!
 //! Run it with:   cargo run --example hello
-//! Controls:      arrow keys or WASD to move, Escape to quit.
+//! Controls:      arrow keys or WASD to move, click to teleport, Escape to quit.
 
 use tiny_engine::prelude::*;
 
@@ -28,6 +28,11 @@ impl Game for Hello {
         // distance = speed x time
         self.position += direction * SPEED * ctx.dt();
 
+        // Clicking teleports the square so its center is under the mouse.
+        if ctx.input.was_mouse_pressed(MouseButton::Left) {
+            self.position = ctx.input.mouse_position() - vec2(SIZE / 2.0, SIZE / 2.0);
+        }
+
         // Keep the square on the screen.
         self.position.x = self.position.x.clamp(0.0, ctx.width() - SIZE);
         self.position.y = self.position.y.clamp(0.0, ctx.height() - SIZE);
@@ -36,7 +41,12 @@ impl Game for Hello {
     fn draw(&self, canvas: &mut Canvas) {
         canvas.clear(Color::rgb(25, 25, 45));
         canvas.draw_text("HELLO, RUST!", vec2(8.0, 8.0), 2, Color::WHITE);
-        canvas.draw_text("MOVE WITH THE ARROW KEYS", vec2(8.0, 24.0), 1, Color::GRAY);
+        canvas.draw_text(
+            "MOVE WITH THE ARROW KEYS, OR CLICK",
+            vec2(8.0, 24.0),
+            1,
+            Color::GRAY,
+        );
 
         let square = Rect::new(self.position.x, self.position.y, SIZE, SIZE);
         canvas.fill_rect(square, Color::ORANGE);
