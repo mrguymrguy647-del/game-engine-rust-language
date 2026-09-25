@@ -74,7 +74,8 @@ pub struct Context {
     dt: f32,
     time: f32,
     frame: u64,
-    fps: f32,
+    /// Seconds per frame, averaged over recent frames. 0.0 until measured.
+    average_frame_time: f32,
     width: usize,
     height: usize,
     quit_requested: bool,
@@ -88,7 +89,7 @@ impl Context {
             dt: 0.0,
             time: 0.0,
             frame: 0,
-            fps: 0.0,
+            average_frame_time: 0.0,
             width,
             height,
             quit_requested: false,
@@ -113,7 +114,11 @@ impl Context {
 
     /// Frames per second, averaged over the last second or so.
     pub fn fps(&self) -> f32 {
-        self.fps
+        if self.average_frame_time > 0.0 {
+            1.0 / self.average_frame_time
+        } else {
+            0.0
+        }
     }
 
     /// Width of the canvas in pixels.
@@ -137,14 +142,17 @@ impl Context {
         self.dt = real_dt.min(MAX_DT);
         self.time += self.dt;
         self.frame += 1;
-        if real_dt > 0.0 {
+        // The first frame is timed from just before the loop started, so its
+        // time is meaningless (almost zero): skip it.
+        if self.frame > 1 && real_dt > 0.0 {
             // A moving average: each frame nudges the value 5% towards the
             // latest measurement, so the number on screen doesn't flicker.
-            let latest = 1.0 / real_dt;
-            self.fps = if self.fps == 0.0 {
-                latest
+            // We average frame *times*, not frames-per-second values: one
+            // unusually quick frame would make a per-second average jump.
+            self.average_frame_time = if self.average_frame_time == 0.0 {
+                real_dt
             } else {
-                self.fps + (latest - self.fps) * 0.05
+                self.average_frame_time + (real_dt - self.average_frame_time) * 0.05
             };
         }
         self.input.begin_frame(keys_down);
@@ -374,7 +382,18 @@ mod tests {
         assert_eq!(ctx.frame(), 2);
         assert_eq!((ctx.width(), ctx.height()), (100.0, 50.0));
         assert!(ctx.input.was_released(Key::Space));
-        assert!(ctx.fps() > 2.0 && ctx.fps() < 40.0);
+        // Only the second frame counts towards the FPS: 1 / 0.025 = 40.
+        assert!((ctx.fps() - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fps_ignores_the_near_zero_first_frame() {
+        let mut ctx = Context::new(100, 50);
+        ctx.begin_frame(0.000_000_05, []); // 50 nanoseconds: "20 million FPS"
+        for _ in 0..10 {
+            ctx.begin_frame(1.0 / 75.0, []);
+        }
+        assert!((ctx.fps() - 75.0).abs() < 0.1, "fps = {}", ctx.fps());
     }
 
     #[test]
