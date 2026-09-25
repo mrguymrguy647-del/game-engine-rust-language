@@ -1,4 +1,4 @@
-//! # tiny_engine
+//! # duckforge
 //!
 //! A deliberately small 2D game engine, written for learning Rust.
 //!
@@ -7,7 +7,7 @@
 //! `update` and `draw` methods once per frame:
 //!
 //! ```no_run
-//! use tiny_engine::prelude::*;
+//! use duckforge::prelude::*;
 //!
 //! struct MyGame {
 //!     x: f32,
@@ -25,7 +25,7 @@
 //! }
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     tiny_engine::run(Config::default(), MyGame { x: 0.0 })
+//!     duckforge::run(Config::default(), MyGame { x: 0.0 })
 //! }
 //! ```
 
@@ -46,7 +46,7 @@ mod font;
 pub use engine::run;
 
 /// Everything a game usually needs, importable in one line:
-/// `use tiny_engine::prelude::*;`
+/// `use duckforge::prelude::*;`
 pub mod prelude {
     pub use crate::canvas::Canvas;
     pub use crate::color::Color;

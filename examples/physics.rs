@@ -6,8 +6,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use tiny_engine::physics::{Body, BodyId, PhysicsWorld, Shape};
-use tiny_engine::prelude::*;
+use duckforge::physics::{Body, BodyId, PhysicsWorld, Shape};
+use duckforge::prelude::*;
 
 const WIDTH: f32 = 320.0;
 const HEIGHT: f32 = 240.0;
@@ -189,8 +189,8 @@ impl Game for Sandbox {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config {
-        title: String::from("Physics sandbox - tiny_engine"),
+        title: String::from("Physics sandbox - duckforge"),
         ..Config::default()
     };
-    tiny_engine::run(config, Sandbox::new())
+    duckforge::run(config, Sandbox::new())
 }

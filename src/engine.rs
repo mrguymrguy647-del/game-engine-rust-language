@@ -52,14 +52,14 @@ pub struct Config {
     /// Show a frames-per-second counter in the corner. F3 toggles it while playing.
     pub show_fps: bool,
     /// What draws 3D: the graphics card if possible (`Auto`), or always the
-    /// CPU. The `TINY_ENGINE_RENDERER` environment variable overrides this.
+    /// CPU. The `DUCKFORGE_RENDERER` environment variable overrides this.
     pub renderer: Renderer,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            title: String::from("tiny_engine"),
+            title: String::from("duckforge"),
             width: 320,
             height: 240,
             scale: 3,
@@ -291,18 +291,16 @@ fn window_to_canvas(
     ))
 }
 
-/// Reads the `TINY_ENGINE_RENDERER` environment variable, if it's set:
+/// Reads the `DUCKFORGE_RENDERER` environment variable, if it's set:
 /// `cpu`, `gpu` or `auto`. It lets you switch renderers without changing code.
 fn renderer_from_env() -> Option<Renderer> {
-    let value = std::env::var("TINY_ENGINE_RENDERER").ok()?;
+    let value = std::env::var("DUCKFORGE_RENDERER").ok()?;
     match value.to_lowercase().as_str() {
         "cpu" => Some(Renderer::Cpu),
         "gpu" => Some(Renderer::Gpu),
         "auto" => Some(Renderer::Auto),
         other => {
-            eprintln!(
-                "tiny_engine: ignoring TINY_ENGINE_RENDERER={other:?} (use cpu, gpu or auto)"
-            );
+            eprintln!("duckforge: ignoring DUCKFORGE_RENDERER={other:?} (use cpu, gpu or auto)");
             None
         }
     }

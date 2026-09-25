@@ -1,7 +1,7 @@
 # Learn Rust by Building a Game Engine
 
 This guide teaches you Rust using the code in this repository: a small
-game engine called **tiny_engine**, which does 2D, 3D (on the CPU or the
+game engine called **duckforge**, which does 2D, 3D (on the CPU or the
 graphics card) and physics, and six example programs built on it. Every Rust concept is shown in real code that
 you can run, change and break.
 
@@ -129,7 +129,7 @@ Open `Cargo.toml`:
 
 ```toml
 [package]
-name = "tiny_engine"
+name = "duckforge"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
@@ -174,7 +174,7 @@ Files in `examples/` are small programs that use the library. Each one
 starts with:
 
 ```rust
-use tiny_engine::prelude::*;
+use duckforge::prelude::*;
 ```
 
 That line brings the engine's most-used names (`Game`, `Canvas`, `Color`,
@@ -432,7 +432,7 @@ Every example creates its `Config` like this:
 
 ```rust
 let config = Config {
-    title: String::from("Hello, tiny_engine"),
+    title: String::from("Hello, duckforge"),
     ..Config::default()
 };
 ```
@@ -653,7 +653,7 @@ they both went away. Rust's answer: only one owner at a time.
 You can see a move in every example's `main`:
 
 ```rust
-tiny_engine::run(config, Breakout::new())
+duckforge::run(config, Breakout::new())
 ```
 
 `run` takes the game *by value*, so the engine now owns your game for as long
@@ -1176,7 +1176,7 @@ produces.
 impl Default for Config {
     fn default() -> Self {
         Self {
-            title: String::from("tiny_engine"),
+            title: String::from("duckforge"),
             width: 320,
             height: 240,
             scale: 3,
@@ -1277,10 +1277,10 @@ pub mod prelude {
 }
 ```
 
-`pub use` re-exports a name, so `use tiny_engine::prelude::*;` brings all of
+`pub use` re-exports a name, so `use duckforge::prelude::*;` brings all of
 them in at once. Many Rust libraries do this. (The physics types aren't in
 the prelude, so games that use physics also write
-`use tiny_engine::physics::{Body, PhysicsWorld};`.)
+`use duckforge::physics::{Body, PhysicsWorld};`.)
 
 ### One type, several files
 
@@ -1351,7 +1351,7 @@ example ends like this:
 ```rust
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ...
-    tiny_engine::run(config, game)
+    duckforge::run(config, game)
 }
 ```
 
@@ -1447,7 +1447,7 @@ you fix a bug, try writing a test that would have caught it.
    examples/*.rs      (your game: implements `Game`, calls `run`)
             |
             v
-+------------------------- tiny_engine --------------------------+
++------------------------- duckforge --------------------------+
 |  engine.rs    run(): the game loop, Context, Config            |
 |               <- the ONLY file that knows minifb exists        |
 |                                                                |
@@ -1954,7 +1954,7 @@ bricks, particles and score are freed automatically.
 ### Using it
 
 ```rust
-use tiny_engine::physics::{Body, PhysicsWorld};
+use duckforge::physics::{Body, PhysicsWorld};
 
 let mut world = PhysicsWorld::new(vec2(0.0, 500.0)); // gravity: 500 px/s², downward
 world.add(Body::block(vec2(160.0, 230.0), vec2(320.0, 20.0)).fixed()); // the floor
@@ -2508,7 +2508,7 @@ pub fn draw_mesh(&mut self, mesh: &Mesh, transform: &Transform, camera: &Camera3
 ```
 
 You choose the renderer with `Config::renderer` (`Auto`, `Gpu` or `Cpu`),
-or for any game without touching code, with the `TINY_ENGINE_RENDERER`
+or for any game without touching code, with the `DUCKFORGE_RENDERER`
 environment variable. `ctx.renderer_name()` tells a game which one is
 actually drawing.
 
@@ -2646,7 +2646,7 @@ Start by copying this skeleton to `examples/mygame.rs`, then run it with
 `cargo run --example mygame`:
 
 ```rust
-use tiny_engine::prelude::*;
+use duckforge::prelude::*;
 
 struct MyGame {
     // your game's state goes here
@@ -2667,7 +2667,7 @@ impl Game for MyGame {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tiny_engine::run(Config::default(), MyGame {})
+    duckforge::run(Config::default(), MyGame {})
 }
 ```
 

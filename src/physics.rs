@@ -6,8 +6,8 @@
 //! gravity you pass in:
 //!
 //! ```
-//! use tiny_engine::physics::{Body, PhysicsWorld};
-//! use tiny_engine::prelude::*;
+//! use duckforge::physics::{Body, PhysicsWorld};
+//! use duckforge::prelude::*;
 //!
 //! // 2D, in pixels. Screen y points down, so gravity is +y.
 //! let mut world = PhysicsWorld::new(vec2(0.0, 500.0));
@@ -93,8 +93,8 @@ pub struct BodyId(usize);
 /// `with_...` methods:
 ///
 /// ```
-/// # use tiny_engine::physics::Body;
-/// # use tiny_engine::prelude::*;
+/// # use duckforge::physics::Body;
+/// # use duckforge::prelude::*;
 /// let bouncy = Body::ball(vec2(10.0, 10.0), 5.0).with_bounce(0.9).with_friction(0.1);
 /// let wall = Body::block(vec2(0.0, 100.0), vec2(10.0, 200.0)).fixed();
 /// ```

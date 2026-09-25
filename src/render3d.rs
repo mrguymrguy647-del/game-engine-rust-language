@@ -175,7 +175,7 @@ impl Camera3D {
 
 /// What draws 3D meshes. Set it with [`Config::renderer`](crate::engine::Config::renderer)
 /// or [`Canvas::set_renderer`], or override it for any game with the
-/// `TINY_ENGINE_RENDERER` environment variable (`cpu`, `gpu` or `auto`).
+/// `DUCKFORGE_RENDERER` environment variable (`cpu`, `gpu` or `auto`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Renderer {
     /// The graphics card if there is a usable one, otherwise the CPU.

@@ -1,4 +1,4 @@
-# tiny_engine: a game engine for learning Rust
+# duckforge: a game engine for learning Rust
 
 A small game engine written in Rust, covering **2D graphics, 3D graphics
 (on the graphics card, or on the CPU) and physics**, plus six example
@@ -65,7 +65,7 @@ cargo doc --open               # browse the engine's documentation
 A game is any type that implements the `Game` trait:
 
 ```rust
-use tiny_engine::prelude::*;
+use duckforge::prelude::*;
 
 struct MyGame {
     x: f32,
@@ -87,7 +87,7 @@ impl Game for MyGame {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tiny_engine::run(Config::default(), MyGame { x: 0.0 })
+    duckforge::run(Config::default(), MyGame { x: 0.0 })
 }
 ```
 
@@ -98,7 +98,7 @@ Save it as `examples/mygame.rs` and run `cargo run --example mygame`.
 A spinning cube you can fly around (WASD and the arrow keys):
 
 ```rust
-use tiny_engine::prelude::*;
+use duckforge::prelude::*;
 
 struct Scene {
     camera: Camera3D,
@@ -125,14 +125,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cube: Mesh::cube(Color::ORANGE),
         time: 0.0,
     };
-    tiny_engine::run(Config::default(), scene)
+    duckforge::run(Config::default(), scene)
 }
 ```
 
 ### With physics
 
 ```rust
-use tiny_engine::physics::{Body, PhysicsWorld};
+use duckforge::physics::{Body, PhysicsWorld};
 
 // 2D, in pixels (y points down). For 3D, pass a Vec3 like vec3(0.0, -9.8, 0.0).
 let mut world = PhysicsWorld::new(vec2(0.0, 500.0));
@@ -149,17 +149,17 @@ world.step(ctx.dt());
 By default 3D uses the graphics card when there's a usable one, and the CPU
 otherwise. To choose, set `Config::renderer` to `Renderer::Auto`, `Gpu` or
 `Cpu`. You can also override it for any game without changing code, with the
-`TINY_ENGINE_RENDERER` environment variable (`cpu`, `gpu` or `auto`):
+`DUCKFORGE_RENDERER` environment variable (`cpu`, `gpu` or `auto`):
 
 ```powershell
 # Windows PowerShell
-$env:TINY_ENGINE_RENDERER = "cpu"; cargo run --release --example world3d
-Remove-Item Env:TINY_ENGINE_RENDERER   # back to the default
+$env:DUCKFORGE_RENDERER = "cpu"; cargo run --release --example world3d
+Remove-Item Env:DUCKFORGE_RENDERER   # back to the default
 ```
 
 ```sh
 # macOS / Linux
-TINY_ENGINE_RENDERER=cpu cargo run --release --example world3d
+DUCKFORGE_RENDERER=cpu cargo run --release --example world3d
 ```
 
 To build without wgpu at all (faster to compile, CPU only), use

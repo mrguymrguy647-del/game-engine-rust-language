@@ -9,8 +9,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::TAU;
 
-use tiny_engine::physics::{Body, BodyId, PhysicsWorld, Shape};
-use tiny_engine::prelude::*;
+use duckforge::physics::{Body, BodyId, PhysicsWorld, Shape};
+use duckforge::prelude::*;
 
 const SKY: Color = Color::from_hex(0x8C_C8_F0);
 const GRASS_LIGHT: Color = Color::from_hex(0x6A_A8_4F);
@@ -303,8 +303,8 @@ impl Game for Playground {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config {
-        title: String::from("3D playground - tiny_engine"),
+        title: String::from("3D playground - duckforge"),
         ..Config::default()
     };
-    tiny_engine::run(config, Playground::new())
+    duckforge::run(config, Playground::new())
 }

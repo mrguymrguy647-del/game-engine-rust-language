@@ -1,9 +1,9 @@
-//! The smallest useful tiny_engine program: a square you can move around.
+//! The smallest useful duckforge program: a square you can move around.
 //!
 //! Run it with:   cargo run --example hello
 //! Controls:      arrow keys or WASD to move, click to teleport, Escape to quit.
 
-use tiny_engine::prelude::*;
+use duckforge::prelude::*;
 
 const SIZE: f32 = 16.0;
 const SPEED: f32 = 120.0; // pixels per second
@@ -55,11 +55,11 @@ impl Game for Hello {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config {
-        title: String::from("Hello, tiny_engine"),
+        title: String::from("Hello, duckforge"),
         ..Config::default()
     };
     let game = Hello {
         position: vec2(152.0, 112.0),
     };
-    tiny_engine::run(config, game)
+    duckforge::run(config, game)
 }

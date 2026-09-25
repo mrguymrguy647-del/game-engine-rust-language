@@ -5,7 +5,7 @@
 
 use std::f32::consts::TAU;
 
-use tiny_engine::prelude::*;
+use duckforge::prelude::*;
 
 struct Shapes {
     /// Seconds of animation so far. Only advances while not paused.
@@ -68,12 +68,12 @@ impl Game for Shapes {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config {
-        title: String::from("Shapes - tiny_engine"),
+        title: String::from("Shapes - duckforge"),
         ..Config::default()
     };
     let game = Shapes {
         time: 0.0,
         paused: false,
     };
-    tiny_engine::run(config, game)
+    duckforge::run(config, game)
 }

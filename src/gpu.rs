@@ -223,7 +223,7 @@ impl GpuRenderer {
 
         // 3. A *device* is our connection to the adapter; the *queue* sends it work.
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("tiny_engine"),
+            label: Some("duckforge"),
             ..Default::default()
         }))
         .map_err(|err| format!("could not open the graphics device: {err}"))?;

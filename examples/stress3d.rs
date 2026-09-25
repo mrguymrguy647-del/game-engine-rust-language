@@ -20,7 +20,7 @@
 use std::f32::consts::TAU;
 use std::time::Instant;
 
-use tiny_engine::prelude::*;
+use duckforge::prelude::*;
 
 const SPACING: f32 = 2.0;
 const PALETTE: [Color; 6] = [
@@ -294,10 +294,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let config = Config {
-        title: String::from("3D stress test - tiny_engine"),
+        title: String::from("3D stress test - duckforge"),
         target_fps: 0, // no frame-rate cap: run as fast as possible
         renderer: options.renderer,
         ..Config::default()
     };
-    tiny_engine::run(config, Stress::new(&options))
+    duckforge::run(config, Stress::new(&options))
 }

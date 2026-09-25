@@ -184,6 +184,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "duckforge"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "minifb",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1123,16 +1133,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "tiny_engine"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "minifb",
- "pollster",
- "wgpu",
 ]
 
 [[package]]

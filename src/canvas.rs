@@ -77,7 +77,7 @@ impl Canvas {
         }
         #[cfg(not(feature = "gpu"))]
         if renderer == Renderer::Gpu {
-            eprintln!("tiny_engine: built without the `gpu` feature, so 3D is drawn on the CPU");
+            eprintln!("duckforge: built without the `gpu` feature, so 3D is drawn on the CPU");
         }
     }
 
@@ -118,7 +118,7 @@ impl Canvas {
             self.gpu = match GpuRenderer::new(self.width, self.height) {
                 Ok(gpu) => GpuSlot::Running(Box::new(gpu)),
                 Err(err) => {
-                    eprintln!("tiny_engine: can't use the GPU ({err}), so 3D is drawn on the CPU");
+                    eprintln!("duckforge: can't use the GPU ({err}), so 3D is drawn on the CPU");
                     GpuSlot::Failed
                 }
             };
