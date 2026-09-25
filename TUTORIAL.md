@@ -1,8 +1,8 @@
 # Learn Rust by Building a Game Engine
 
 This guide teaches you Rust using the code in this repository: a small
-game engine called **tiny_engine**, which does 2D, 3D and physics, and five
-example programs built on it. Every Rust concept is shown in real code that
+game engine called **tiny_engine**, which does 2D, 3D (on the CPU or the
+graphics card) and physics, and six example programs built on it. Every Rust concept is shown in real code that
 you can run, change and break.
 
 - **Part 1** teaches the Rust language, one idea at a time.
@@ -39,10 +39,11 @@ Keep the source files open next to this guide. When you see a file like
   - [18. Breakout, piece by piece](#18-breakout-piece-by-piece)
   - [19. Physics](#19-physics)
   - [20. 3D graphics](#20-3d-graphics)
+  - [21. Moving 3D to the GPU](#21-moving-3d-to-the-gpu)
 - **Part 3: Your turn**
-  - [21. Exercises](#21-exercises)
-  - [22. Common compiler errors](#22-common-compiler-errors)
-  - [23. Where to go next](#23-where-to-go-next)
+  - [22. Exercises](#22-exercises)
+  - [23. Common compiler errors](#23-common-compiler-errors)
+  - [24. Where to go next](#24-where-to-go-next)
 
 ---
 
@@ -57,7 +58,7 @@ Keep the source files open next to this guide. When you see a file like
 | `rustup` | Installs and updates Rust itself (`rustup update`).  |
 
 On Windows the installer will ask you to install the Visual Studio C++ Build
-Tools. Say yes: Rust needs their linker. This project needs Rust 1.85 or
+Tools. Say yes: Rust needs their linker. This project needs Rust 1.87 or
 newer; `rustc --version` tells you what you have.
 
 **Run the games** from the project folder:
@@ -68,10 +69,12 @@ cargo run --example shapes     # every 2D drawing function, animated
 cargo run --example breakout   # the full Breakout game
 cargo run --example physics    # a 2D physics sandbox: click to drop things
 cargo run --example world3d    # a 3D world with physics: fly around, throw balls
+cargo run --release --example stress3d   # thousands of 3D shapes: how fast is it?
 ```
 
-The first build takes a minute because Cargo downloads and compiles minifb
-and the crates it depends on. After that, builds are fast. Adding
+The first build takes a few minutes because Cargo downloads and compiles
+minifb, wgpu (the graphics card library) and the crates they depend on.
+After that, builds are fast. Adding
 `--release` gives fully optimized builds, but the project is set up so
 normal builds run smoothly too.
 
@@ -104,13 +107,16 @@ src/
   color.rs          Color
   rng.rs            random numbers
   physics.rs        physics for 2D and 3D: gravity, bouncing, friction, stacking
-  render3d.rs       3D: cameras, meshes, transforms, lighting
+  render3d.rs       3D: cameras, meshes, transforms, lighting, and the CPU renderer
+  gpu.rs            the GPU renderer, using wgpu
+  gpu.wgsl          the small programs (shaders) that run on the graphics card
 examples/
   hello.rs          the smallest game
   shapes.rs         a tour of the 2D drawing functions
   breakout.rs       a complete 2D game
   physics.rs        a 2D physics sandbox
   world3d.rs        a 3D playground with physics
+  stress3d.rs       a 3D stress test and benchmark
 ```
 
 ---
@@ -126,11 +132,18 @@ Open `Cargo.toml`:
 name = "tiny_engine"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "A small game engine (2D, 3D and physics), written for learning Rust"
+
+[features]
+default = ["gpu"]
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dependencies]
 minifb = "0.28"
+wgpu = { version = "30", optional = true }
+pollster = { version = "1", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
 
 [profile.dev]
 opt-level = 1
@@ -143,9 +156,16 @@ opt-level = 1
   Rust improve without breaking old code. `rust-version` is the oldest
   compiler that can build the project.
 - `[dependencies]` lists other crates to download from
-  [crates.io](https://crates.io). We use exactly one: **minifb**, which opens
-  a window, shows pixels and reports key presses. Everything else we write
-  ourselves, because that's the point of the exercise.
+  [crates.io](https://crates.io). **minifb** opens a window, shows pixels
+  and reports key presses. The other three are only for the GPU renderer
+  ([chapter 21](#21-moving-3d-to-the-gpu)): **wgpu** talks to the graphics
+  card, **pollster** waits for its `async` setup, and **bytemuck** turns
+  data into raw bytes for it. Everything else we write ourselves, because
+  that's the point of the exercise.
+- `[features]` are optional parts of a crate. `gpu` switches on the three
+  `optional = true` dependencies (`dep:wgpu` means "the wgpu dependency"),
+  and `default = ["gpu"]` turns it on unless you say otherwise.
+  `cargo build --no-default-features` builds a smaller, CPU-only engine.
 - `[profile.dev]` changes how normal (debug) builds are compiled.
   `opt-level = 1` turns on light optimization, because code that touches
   every pixel is very slow without any.
@@ -1204,6 +1224,8 @@ trait objects for a while.
 pub mod canvas;
 pub mod color;
 pub mod engine;
+#[cfg(feature = "gpu")]
+mod gpu;
 pub mod input;
 pub mod math;
 pub mod physics;
@@ -1213,6 +1235,11 @@ pub mod rng;
 // Not `pub`: the font is an internal detail of `Canvas::draw_text`.
 mod font;
 ```
+
+`#[cfg(feature = "gpu")]` means "only compile the next item when the `gpu`
+feature is on". Without the feature, `gpu.rs` isn't even compiled, and
+neither is any line marked the same way elsewhere (like the GPU field in
+`Canvas`).
 
 **Everything is private by default.** You choose what to share:
 
@@ -1245,7 +1272,7 @@ pub mod prelude {
     pub use crate::engine::{Config, Context, Game};
     pub use crate::input::{Input, Key, MouseButton};
     pub use crate::math::{Rect, Vec2, Vec3, vec2, vec3};
-    pub use crate::render3d::{Camera3D, Mesh, Transform};
+    pub use crate::render3d::{Camera3D, Mesh, Renderer, Transform};
     pub use crate::rng::Rng;
 }
 ```
@@ -1426,7 +1453,8 @@ you fix a bug, try writing a test that would have caught it.
 |                                                                |
 |  canvas.rs    pixels, 2D drawing, triangles, depth buffer      |
 |  font.rs      the pixel font that canvas.rs draws text with    |
-|  render3d.rs  3D: camera, meshes, lighting (draws on canvas)   |
+|  render3d.rs  3D: camera, meshes, lighting, the CPU renderer   |
+|  gpu.rs       the GPU renderer (wgpu), draws into the canvas   |
 |  physics.rs   bodies, collisions, bouncing (2D and 3D)         |
 |  input.rs     keyboard and mouse                               |
 |  math.rs      Vec2, Rect, Vec3, Vector    color.rs    rng.rs   |
@@ -1446,10 +1474,11 @@ Four design decisions shape everything:
 2. **Only one file touches the window library.** Games use our own `Key`
    type, not minifb's. To switch to another library (like SDL2 or winit),
    you'd rewrite `engine.rs` and nothing else.
-3. **The engine draws every pixel itself, even in 3D.** No GPU and no
-   graphics API, just a `Vec<u32>`. That's slower than a GPU, but a 320x240
-   screen is only 76,800 pixels and modern CPUs don't break a sweat. And you
-   can understand every line.
+3. **Everything ends up in one `Vec<u32>` of pixels.** 2D is always drawn
+   by our own code. 3D is drawn either by our own code on the CPU (so you can
+   read every step) or by the graphics card (for big scenes). Either way,
+   the result lands in the same pixels, and the window never knows the
+   difference.
 4. **Physics and drawing don't know about each other.** The physics world
    only moves bodies around; the game draws each body wherever the physics
    put it. You can use either without the other.
@@ -1474,6 +1503,10 @@ while window.is_open() && !ctx.quit_requested {
     // 3 + 4. The game's turn.
     game.update(&mut ctx);
     game.draw(&mut canvas);
+    canvas.flush_3d(); // make sure any 3D from the graphics card is in the pixels
+    if ctx.renderer_name != canvas.renderer_name() {
+        ctx.renderer_name = canvas.renderer_name().to_string();
+    }
 
     if ctx.input.was_pressed(Key::F3) {
         show_fps = !show_fps;
@@ -2208,19 +2241,328 @@ It also uses two classic cheap tricks:
   screen, and everything below it is painted grass-colored before the
   checkerboard is drawn. So the world doesn't seem to end in mid-air.
 
-### Why not the graphics card?
+### What about the graphics card?
 
 Real 3D engines send triangles to the GPU, which runs these same steps
 (transform, clip, cull, rasterize, depth test) in hardware, on millions of
-triangles per frame. This CPU version manages a few thousand at 320x240.
-But it's the same pipeline, and now you know what's inside it. When you
-want more, look at the `wgpu` crate, or at an engine like Bevy.
+triangles per frame. This engine can do that too: that's the next chapter.
+The CPU renderer in this chapter stays, as a fallback and as the version
+you can read line by line.
+
+## 21. Moving 3D to the GPU
+
+A graphics card (GPU) is a chip with thousands of small processors that
+all run the same short program at once, on different data: one per
+triangle corner, then one per pixel. Our CPU renderer handles triangles
+one after another. `src/gpu.rs` hands them to the GPU instead, using the
+**wgpu** crate, which talks to whatever graphics API the computer has
+(DirectX 12 on Windows, Metal on Mac, Vulkan or OpenGL on Linux).
+
+Nothing changes for games: `draw_mesh` has the same signature, and all
+the examples run unchanged. By default the engine uses the GPU if there's
+a usable one, and falls back to the CPU (with a message saying why) if not.
+
+### Measure first: the stress test
+
+Before changing anything, `examples/stress3d.rs` measured the CPU renderer
+by drawing thousands of spinning shapes:
+
+```sh
+cargo run --release --example stress3d -- --objects 5000 --seconds 10 --renderer cpu
+cargo run --release --example stress3d -- --objects 5000 --seconds 10 --renderer gpu
+```
+
+(Everything after the `--` goes to the program, not to Cargo.) It runs
+without a frame-rate cap, ignores the first two seconds while things warm
+up, then prints the average FPS and quits.
+
+Writing the benchmark first also caught a bug: the F3 counter said 215
+FPS while the benchmark measured 77. The very first frame is timed from a
+moment just before the loop started, so it looked like "20 million FPS",
+and the average took ages to forget it. The fix (skip that frame, and
+average frame *times* rather than FPS values) came with a test.
+
+### The plan: draw offscreen, copy back
+
+The window library (minifb) shows a block of pixels in memory. So the GPU
+renderer draws 3D into an image *on the graphics card*, then copies the
+finished image back into the canvas's pixels:
+
+1. `draw_mesh` doesn't draw. It records which mesh to draw, and where.
+2. When the picture is needed, the recorded objects are drawn on the GPU,
+   on top of a copy of the canvas (so 2D drawn *before* the 3D stays
+   underneath), with the GPU's own depth buffer.
+3. The result is copied back into `canvas.pixels`.
+
+"When the picture is needed" means: the next time anything is drawn in 2D
+(so 2D drawn *after* 3D lands on top), or at the end of the frame, when the
+engine calls `canvas.flush_3d()`. That keeps the layering exactly as it
+was with the CPU renderer. And a game that never draws 3D never even
+starts the GPU.
+
+### Setting up wgpu
+
+wgpu's setup follows the WebGPU standard: an *instance* (the library), an
+*adapter* (one graphics card), and a *device* plus *queue* (our connection
+to it, and the way to send it work):
+
+```rust
+let instance =
+    wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+```
+
+```rust
+let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+    power_preference: wgpu::PowerPreference::HighPerformance,
+    ..Default::default()
+}))
+.map_err(|err| format!("no graphics adapter found: {err}"))?;
+```
+
+`request_adapter` is an `async` function: it returns a *future*, a value
+that will be ready later. Asking the operating system for a graphics card
+can take a moment, and on the web you're not allowed to just wait. On the
+desktop, waiting is fine, so `pollster::block_on` waits until the future
+finishes. (Rust's `async` is a big topic; for this engine, "call
+`block_on`" is all you need.)
+
+### Shaders: programs for the graphics card
+
+The GPU runs programs called **shaders**, written here in WGSL, the WebGPU
+Shading Language (`src/gpu.wgsl`). It looks a lot like Rust. Two run for
+every object:
+
+- The **vertex shader** (`vs_main`) runs once per triangle corner. It
+  multiplies the corner by the object's matrix and the camera's matrix to
+  find where it lands on screen.
+- The **fragment shader** (`fs_main`) runs once per pixel the triangle
+  covers, and returns its color. It uses the same lighting formula as the
+  CPU renderer:
+
+  ```wgsl
+  let sunlight = max(dot(normal, globals.sun.xyz), 0.0);
+  let ambient = globals.sun.w;
+  let brightness = ambient + (1.0 - ambient) * sunlight;
+  return vec4<f32>(in.color * brightness, 1.0);
+  ```
+
+  The CPU finds a triangle's normal from its three corners. A pixel
+  program only sees one pixel, so it asks how the position changes towards
+  the neighboring pixels (`dpdx` and `dpdy`): two directions lying in the
+  triangle, whose cross product is the normal.
+
+### Matrices: many steps in one
+
+The CPU renderer moves each corner step by step: scale, rotate three times,
+move, then the camera's undo-moves. The GPU wants all of that as a single
+**4x4 matrix** per object, so `src/math.rs` gained `Mat4`. Multiplying two
+matrices gives one matrix that does both jobs, read right to left:
+
+```rust
+pub fn view_matrix(&self) -> Mat4 {
+    Mat4::rotation_x(-self.pitch)
+        * Mat4::rotation_y(-self.yaw)
+        * Mat4::translation(-self.position)
+}
+```
+
+The GPU picture must match the CPU picture, so a test checks that the
+matrices put points in exactly the same places as `Transform::apply`,
+`to_camera_space` and the CPU's projection:
+
+```rust
+assert!(transform.matrix().transform_point(point).distance(world) < 1e-4);
+```
+
+A second test draws a whole scene with both renderers and checks that
+fewer than 2% of the pixels differ (a few edge pixels round differently).
+
+The projection matrix produces a depth of `near / distance`: bigger means
+closer, the same idea as the CPU renderer's `1 / distance`. GPU
+programmers call this *reversed Z*, and it keeps far-away depths precise.
+
+### Talking in bytes: `#[repr(C)]` and bytemuck
+
+The GPU receives raw bytes, so the data sent to it must have an exact,
+known layout:
+
+```rust
+struct Vertex {
+    position: [f32; 3],
+    color: [u8; 4],
+}
+```
+
+`#[repr(C)]` tells Rust to lay the fields out in order, with no
+rearranging, and `#[derive(Pod, Zeroable)]` from bytemuck promises the type
+is "plain old data" (any bytes are a valid value). Then
+`bytemuck::cast_slice(&vertices)` views a whole `Vec<Vertex>` as bytes
+without copying anything.
+
+A small trick saves a conversion every frame. A canvas pixel `0x00RRGGBB`
+sits in memory as the bytes B, G, R, 0, which is exactly the GPU texture
+format `Bgra8Unorm`. So the canvas can be sent to the GPU, and read back,
+as it is.
+
+### Instancing: one draw call for many objects
+
+Telling the GPU "draw this" has a cost of its own, so drawing 10,000 cubes
+with 10,000 commands would be slow. Instead, every copy of the same mesh is
+drawn with **one** command. The objects' matrices go in a second buffer,
+which the pipeline reads with `VertexStepMode::Instance`: "move to the next
+matrix only for the next *copy* of the mesh":
+
+```rust
+// One draw call per mesh, however many copies of it there are.
+let mut first = 0u32;
+for (key, instances) in &batches {
+    let count = instances.len() as u32;
+    let mesh = &self.meshes[key];
+    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+    pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+    pass.draw(0..mesh.vertex_count, first..first + count);
+    first += count;
+}
+```
+
+The stress test uses 18 different meshes, so even 20,000 objects take only
+18 draw calls.
+
+### The mesh cache, and a bug caught before it shipped
+
+Each mesh is sent to the GPU once and kept there. But how do we recognize a
+mesh we've seen before? `Mesh` has public fields, so a game can change one
+at any time, and there's no id to go by.
+
+The first version used the mesh's *address* in memory. Then I noticed that
+this code would break it:
+
+```rust
+canvas.draw_mesh(&Mesh::cube(Color::RED), &left, &camera);
+canvas.draw_mesh(&Mesh::cube(Color::BLUE), &right, &camera);
+```
+
+Each temporary cube is dropped right after its line, so the blue cube is
+very likely built at the same address as the red one. Both would have been
+drawn red! So the cache key is the address *plus a fingerprint* (a hash of
+the whole mesh). Fingerprinting is slow for big meshes, so within one batch
+it's only done once per address, and repeat draws just compare a small
+*sample* (the first, middle and last corner and triangle):
+
+```rust
+fn key_for(&mut self, mesh: &Mesh) -> MeshKey {
+    let address = address_of(mesh);
+    let quick = sample(mesh);
+    match self.seen.get(&address) {
+        Some(seen) if seen.sample == quick => (address, seen.fingerprint),
+```
+
+There's a test for exactly that red-and-blue case, and one for editing a
+mesh between frames.
+
+### Reading the picture back
+
+After the GPU draws, the picture is copied into a buffer the CPU can read.
+Two details:
+
+- Each row in that buffer must take a multiple of 256 bytes, so rows are
+  *padded*, and the padding is skipped when copying into the canvas:
+
+  ```rust
+  let padded_bytes_per_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+      * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+  ```
+
+- The GPU works *alongside* the CPU. `map_async` asks for the buffer, and
+  `device.poll(PollType::wait_indefinitely())` waits until the GPU has
+  finished drawing and the bytes are ready.
+
+### Falling back to the CPU
+
+The canvas keeps track of its GPU with an enum, a small state machine like
+Breakout's:
+
+```rust
+enum GpuSlot {
+    /// Draw 3D on the CPU.
+    Off,
+    /// Use the GPU, but nothing needed it yet. It starts at the first `draw_mesh`.
+    NotStarted,
+    /// The GPU is ready. (`Box` keeps the big renderer out of the `Canvas` itself.)
+    Running(Box<GpuRenderer>),
+    /// Starting the GPU didn't work, so 3D is drawn on the CPU.
+    Failed,
+}
+```
+
+And `draw_mesh` tries the GPU first:
+
+```rust
+pub fn draw_mesh(&mut self, mesh: &Mesh, transform: &Transform, camera: &Camera3D) {
+    #[cfg(feature = "gpu")]
+    if self.draw_mesh_on_gpu(mesh, transform, camera) {
+        return; // the graphics card will draw it (see gpu.rs)
+    }
+
+    // Otherwise, draw it right here on the CPU.
+```
+
+You choose the renderer with `Config::renderer` (`Auto`, `Gpu` or `Cpu`),
+or for any game without touching code, with the `TINY_ENGINE_RENDERER`
+environment variable. `ctx.renderer_name()` tells a game which one is
+actually drawing.
+
+### Measure, don't guess
+
+The first GPU version spent about 380 nanoseconds of CPU time per object
+just *recording* draws. That sounds tiny, but 20,000 objects make 7.6 ms
+per frame, which would cap even the fastest graphics card at about 130 FPS.
+My guess was the hashing, so I swapped in a faster hash function. It barely
+helped (380 to 350 ns). Then I timed each step separately:
+
+```text
+Transform::matrix(): 242 ns per object
+draw_mesh (record only): 288 ns per object
+```
+
+The matrix math was the real cost. `Mat4::transform` was written as a loop
+the compiler couldn't optimize well, and every rotation was computed even
+for an angle of zero. Writing the sums out and skipping zero rotations
+brought `matrix()` to 71 ns and the whole recording to about 180 ns per
+object. The lesson generalizes to all programming: **measure before you
+optimize**. The slow part is often not where you'd guess.
+
+### Numbers
+
+Numbers from the 4-core cloud machine this was built on:
+
+| Objects | Triangles | CPU renderer | wgpu on llvmpipe |
+|---:|---:|---:|---:|
+| 500 | 21,828 | 177 FPS | 104 FPS |
+| 2,000 | 88,728 | 79 FPS | 47 FPS |
+| 5,000 | 222,336 | 40 FPS | 21 FPS |
+| 10,000 | 452,520 | 22 FPS | 13 to 17 FPS |
+| 20,000 | 906,840 | 12 FPS | 8 FPS |
+
+Surprised? That machine has **no graphics card**. The "GPU" there is
+*llvmpipe*, which imitates a graphics card in software on the same four CPU
+cores, and it's slower than our CPU renderer, which only does exactly what
+this engine needs. On a real graphics card the GPU column should be far
+higher. Run the benchmark on your own computer to see the real difference.
+
+### Limits and next steps
+
+- The 3D picture has the canvas's resolution. For sharper 3D, make the
+  canvas bigger in `Config` (with a smaller `scale`).
+- Copying the picture back each frame costs a little time, and makes the CPU
+  wait for the GPU. The next big step would be to let wgpu draw straight
+  into the window, which means replacing minifb with a library like winit.
 
 ---
 
 # Part 3: Your turn
 
-## 21. Exercises
+## 22. Exercises
 
 Do them in order. After each change, run the game and see what happened.
 When the compiler complains, **read the whole error message**: Rust's error
@@ -2288,10 +2630,15 @@ messages are unusually helpful, and often include the fix.
     by their velocity, and friction carries whatever sits on top.
 16. **A snowman.** In the 3D playground, stack three white spheres of
     different sizes, then give it a small orange pyramid for a nose.
-17. **Fog.** Add a `fog: Option<Color>` field to `Camera3D`. In
+17. **Fog.** Add a `fog: Option<Color>` field to `Camera3D`. In the CPU
     `draw_mesh`, blend each triangle's color towards it the further away it
-    is: `color.lerp(fog, (distance / 25.0).min(1.0))`. Fading into the
-    distance makes a 3D scene look much deeper.
+    is: `color.lerp(fog, (distance / 25.0).min(1.0))`. Then do the same in
+    `fs_main` in `gpu.wgsl` (WGSL has `mix(a, b, t)`), passing the fog color
+    in `Globals`. Run the stress test with both renderers to compare.
+18. **A color per object.** Right now every color needs its own mesh. Add
+    a `color: [f32; 4]` to the GPU's `Instance`, read it in the vertex
+    shader, and multiply it in. One white cube mesh could then draw cubes of
+    every color, with a single draw call.
 
 ### New games
 
@@ -2324,19 +2671,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-18. **Pong.** Two paddles (W/S and Up/Down), one ball, a score for each
+19. **Pong.** Two paddles (W/S and Up/Down), one ball, a score for each
     side. You can reuse a lot of Breakout.
-19. **Snake.** Use a grid: 16x16 pixel cells give a 20x15 board. The snake
+20. **Snake.** Use a grid: 16x16 pixel cells give a 20x15 board. The snake
     is a `VecDeque<(i32, i32)>` (from `std::collections`): push a new head,
     pop the tail. Move only every 0.1 s by adding up `dt` in a timer. Place
     food with `ctx.rng.range_i32(0, 20)`. Use an enum for the direction.
-20. **Space invaders.** A ship, bullets in a `Vec`, rows of aliens that
+21. **Space invaders.** A ship, bullets in a `Vec`, rows of aliens that
     march sideways and step down.
-21. **A 3D game.** A marble you steer with the arrow keys (apply impulses
+22. **A 3D game.** A marble you steer with the arrow keys (apply impulses
     to a ball body) across floating platforms, with the camera following
     it. Or 3D Breakout, with a `PhysicsWorld<Vec3>`.
 
-## 22. Common compiler errors
+## 23. Common compiler errors
 
 | Error    | Message (short)                                   | Usually means                                                 |
 |----------|---------------------------------------------------|---------------------------------------------------------------|
@@ -2351,7 +2698,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For a long explanation of any error, run `rustc --explain E0502`.
 
-## 23. Where to go next
+## 24. Where to go next
 
 - **The Rust Programming Language** ("the Book"), free at
   <https://doc.rust-lang.org/book/>. The best way to learn Rust properly.
@@ -2366,6 +2713,8 @@ For a long explanation of any error, run `rustc --explain E0502`.
 - **3D rendering:** [tinyrenderer](https://github.com/ssloy/tinyrenderer) and
   [Scratchapixel](https://www.scratchapixel.com) build a software renderer
   step by step, like `src/render3d.rs` but with textures and smooth shading.
+- **The GPU:** [Learn Wgpu](https://sotrh.github.io/learn-wgpu/) walks
+  through wgpu step by step, including drawing straight into a window.
 - **Real Rust game engines**, now that you know what's under the hood:
   - [macroquad](https://macroquad.rs): simple, and similar in spirit to this engine, but GPU-powered.
   - [Bevy](https://bevyengine.org): a big, modern engine built around an *Entity Component System*.

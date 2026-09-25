@@ -10,7 +10,10 @@ use std::path::Path;
 
 use crate::color::Color;
 use crate::font;
+#[cfg(feature = "gpu")]
+use crate::gpu::GpuRenderer;
 use crate::math::{Rect, Vec2, vec2};
+use crate::render3d::Renderer;
 
 /// A 2D grid of pixels.
 ///
@@ -24,16 +27,108 @@ pub struct Canvas {
     /// stored as `1 / distance` (so bigger means closer, and 0.0 means nothing
     /// has been drawn yet). This is called a *depth buffer* or *z-buffer*.
     depth: Vec<f32>,
+    /// Whether 3D drawing goes to the graphics card. This field only exists
+    /// when the engine is built with the `gpu` feature.
+    #[cfg(feature = "gpu")]
+    gpu: GpuSlot,
+}
+
+/// The state of a canvas's connection to the graphics card.
+#[cfg(feature = "gpu")]
+enum GpuSlot {
+    /// Draw 3D on the CPU.
+    Off,
+    /// Use the GPU, but nothing needed it yet. It starts at the first `draw_mesh`.
+    NotStarted,
+    /// The GPU is ready. (`Box` keeps the big renderer out of the `Canvas` itself.)
+    Running(Box<GpuRenderer>),
+    /// Starting the GPU didn't work, so 3D is drawn on the CPU.
+    Failed,
 }
 
 impl Canvas {
-    /// Creates a black canvas.
+    /// Creates a black canvas. It draws 3D on the CPU until you call
+    /// [`Canvas::set_renderer`]. The engine's own canvas uses the GPU if it can.
     pub fn new(width: usize, height: usize) -> Self {
         Self {
             width,
             height,
             pixels: vec![0; width * height],
             depth: vec![0.0; width * height],
+            #[cfg(feature = "gpu")]
+            gpu: GpuSlot::Off,
+        }
+    }
+
+    /// Chooses what draws 3D meshes: the graphics card or the CPU.
+    ///
+    /// The GPU only starts up when the first mesh is drawn, so 2D games
+    /// never touch it. If it can't start (no suitable graphics driver, or
+    /// the engine was built without the `gpu` feature), 3D is drawn on the
+    /// CPU instead, and a message says why.
+    pub fn set_renderer(&mut self, renderer: Renderer) {
+        self.flush_3d();
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu = match renderer {
+                Renderer::Cpu => GpuSlot::Off,
+                Renderer::Auto | Renderer::Gpu => GpuSlot::NotStarted,
+            };
+        }
+        #[cfg(not(feature = "gpu"))]
+        if renderer == Renderer::Gpu {
+            eprintln!("tiny_engine: built without the `gpu` feature, so 3D is drawn on the CPU");
+        }
+    }
+
+    /// What is drawing 3D right now: `"CPU"`, or `"GPU: "` plus the graphics
+    /// card's name.
+    pub fn renderer_name(&self) -> &str {
+        #[cfg(feature = "gpu")]
+        match &self.gpu {
+            GpuSlot::Running(gpu) => return gpu.description(),
+            GpuSlot::NotStarted => return "GPU (not started yet)",
+            GpuSlot::Off | GpuSlot::Failed => {}
+        }
+        "CPU"
+    }
+
+    /// Finishes any 3D drawing that is still waiting on the graphics card,
+    /// so that [`Canvas::pixels`] and [`Canvas::get_pixel`] include it.
+    ///
+    /// You rarely need this: the engine calls it at the end of every frame,
+    /// and drawing anything in 2D calls it first, so 2D drawn after 3D
+    /// always lands on top.
+    pub fn flush_3d(&mut self) {
+        #[cfg(feature = "gpu")]
+        if let GpuSlot::Running(gpu) = &mut self.gpu {
+            gpu.flush(&mut self.pixels);
+        }
+    }
+
+    /// Hands a mesh to the GPU. Returns `false` if the CPU should draw it instead.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn draw_mesh_on_gpu(
+        &mut self,
+        mesh: &crate::render3d::Mesh,
+        transform: &crate::render3d::Transform,
+        camera: &crate::render3d::Camera3D,
+    ) -> bool {
+        if matches!(self.gpu, GpuSlot::NotStarted) {
+            self.gpu = match GpuRenderer::new(self.width, self.height) {
+                Ok(gpu) => GpuSlot::Running(Box::new(gpu)),
+                Err(err) => {
+                    eprintln!("tiny_engine: can't use the GPU ({err}), so 3D is drawn on the CPU");
+                    GpuSlot::Failed
+                }
+            };
+        }
+        match &mut self.gpu {
+            GpuSlot::Running(gpu) => {
+                gpu.draw(mesh, transform, camera, &mut self.pixels);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -55,6 +150,10 @@ impl Canvas {
     pub fn clear(&mut self, color: Color) {
         self.pixels.fill(color.to_u32());
         self.depth.fill(0.0);
+        #[cfg(feature = "gpu")]
+        if let GpuSlot::Running(gpu) = &mut self.gpu {
+            gpu.clear(); // throw away 3D that was never shown, and reset the GPU's depth
+        }
     }
 
     /// Converts `(x, y)` into an index into `pixels`, or `None` if it is off-canvas.
@@ -67,6 +166,7 @@ impl Canvas {
 
     /// Sets one pixel. Pixels outside the canvas are silently ignored.
     pub fn set_pixel(&mut self, x: i32, y: i32, color: Color) {
+        self.flush_3d(); // 3D drawn earlier must end up *under* this pixel
         if let Some(i) = self.index(x, y) {
             self.pixels[i] = color.to_u32();
         }
@@ -79,6 +179,7 @@ impl Canvas {
 
     /// Fills a rectangle. Parts outside the canvas are clipped away.
     pub fn fill_rect(&mut self, rect: Rect, color: Color) {
+        self.flush_3d();
         // Round to whole pixels, then clamp to the canvas so we never index out of bounds.
         let clamp_x = |v: f32| (v.round() as i32).clamp(0, self.width as i32) as usize;
         let clamp_y = |v: f32| (v.round() as i32).clamp(0, self.height as i32) as usize;
@@ -157,6 +258,7 @@ impl Canvas {
 
     /// Fills a triangle given its three corners, in any order.
     pub fn fill_triangle(&mut self, a: Vec2, b: Vec2, c: Vec2, color: Color) {
+        self.flush_3d();
         let c32 = color.to_u32();
         let pixels = &mut self.pixels;
         for_each_pixel_in_triangle(self.width, self.height, [a, b, c], |i, _| {

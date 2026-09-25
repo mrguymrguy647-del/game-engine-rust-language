@@ -387,6 +387,137 @@ impl Vector for Vec3 {
     }
 }
 
+/// A 4x4 matrix: one package holding a whole chain of moves, rotations,
+/// scalings, and even the perspective projection.
+///
+/// The GPU renderer uses these: instead of rotating and moving every
+/// corner step by step like the CPU renderer, it multiplies each corner by
+/// one matrix. Multiplying two matrices gives a matrix that does both jobs,
+/// so `translation * rotation * scaling` scales first, then rotates, then
+/// moves (read right to left).
+///
+/// The numbers are stored column by column, the layout GPUs expect:
+/// `columns[c][r]` is row `r` of column `c`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mat4 {
+    pub columns: [[f32; 4]; 4],
+}
+
+impl Mat4 {
+    /// The "do nothing" matrix.
+    pub const IDENTITY: Mat4 = Mat4 {
+        columns: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    };
+
+    /// Moves points by `offset`.
+    pub fn translation(offset: Vec3) -> Mat4 {
+        let mut m = Mat4::IDENTITY;
+        m.columns[3] = [offset.x, offset.y, offset.z, 1.0];
+        m
+    }
+
+    /// Stretches points along each axis.
+    pub fn scaling(scale: Vec3) -> Mat4 {
+        let mut m = Mat4::IDENTITY;
+        m.columns[0][0] = scale.x;
+        m.columns[1][1] = scale.y;
+        m.columns[2][2] = scale.z;
+        m
+    }
+
+    /// The same rotation as [`Vec3::rotate_x`].
+    pub fn rotation_x(angle: f32) -> Mat4 {
+        let (sin, cos) = angle.sin_cos();
+        Mat4 {
+            columns: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, cos, -sin, 0.0],
+                [0.0, sin, cos, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// The same rotation as [`Vec3::rotate_y`].
+    pub fn rotation_y(angle: f32) -> Mat4 {
+        let (sin, cos) = angle.sin_cos();
+        Mat4 {
+            columns: [
+                [cos, 0.0, -sin, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [sin, 0.0, cos, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// The same rotation as [`Vec3::rotate_z`].
+    pub fn rotation_z(angle: f32) -> Mat4 {
+        let (sin, cos) = angle.sin_cos();
+        Mat4 {
+            columns: [
+                [cos, sin, 0.0, 0.0],
+                [-sin, cos, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// A perspective projection for a camera looking along +z, in the form
+    /// the GPU wants: x and y from -1 to 1 across the screen, and a *depth*
+    /// that is 1.0 at `near` and shrinks towards 0.0 far away.
+    ///
+    /// That depth is `near / distance`: the same "bigger means closer" idea
+    /// as the CPU renderer's `1 / distance` depth buffer. (GPU programmers
+    /// call it *reversed Z*: it keeps far-away depths precise.)
+    pub fn perspective(fov_y: f32, aspect: f32, near: f32) -> Mat4 {
+        let y = 1.0 / (fov_y / 2.0).tan();
+        let x = y / aspect;
+        Mat4 {
+            columns: [
+                [x, 0.0, 0.0, 0.0],
+                [0.0, y, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0], // w = z: the GPU divides by the distance
+                [0.0, 0.0, near, 0.0],
+            ],
+        }
+    }
+
+    /// Multiplies a 4-number column `[x, y, z, w]` by this matrix.
+    ///
+    /// Each result row adds up "column times amount" over the four columns.
+    /// (Written out in full because the GPU renderer does this thousands of
+    /// times per frame; the compiler turns it into very fast code.)
+    pub fn transform(&self, v: [f32; 4]) -> [f32; 4] {
+        let c = &self.columns;
+        [0, 1, 2, 3]
+            .map(|row| c[0][row] * v[0] + c[1][row] * v[1] + c[2][row] * v[2] + c[3][row] * v[3])
+    }
+
+    /// Transforms a point (a position, so moves apply to it).
+    pub fn transform_point(&self, p: Vec3) -> Vec3 {
+        let [x, y, z, _] = self.transform([p.x, p.y, p.z, 1.0]);
+        vec3(x, y, z)
+    }
+}
+
+impl Mul for Mat4 {
+    type Output = Mat4;
+
+    /// `a * b` does `b` first, then `a`.
+    fn mul(self, rhs: Mat4) -> Mat4 {
+        Mat4 {
+            columns: rhs.columns.map(|column| self.transform(column)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +608,43 @@ mod tests {
         assert_eq!(vec3(1.0, 2.0, 3.0).with(1, 9.0), vec3(1.0, 9.0, 3.0));
         assert_eq!(vec2(4.0, 5.0).get(0), 4.0);
         assert_eq!(<Vec3 as Vector>::DIMENSIONS, 3);
+    }
+
+    #[test]
+    fn matrix_rotations_match_vector_rotations() {
+        let p = vec3(1.0, -2.0, 3.0);
+        for angle in [0.3, -1.2, 2.5] {
+            assert!(close(
+                Mat4::rotation_x(angle).transform_point(p),
+                p.rotate_x(angle)
+            ));
+            assert!(close(
+                Mat4::rotation_y(angle).transform_point(p),
+                p.rotate_y(angle)
+            ));
+            assert!(close(
+                Mat4::rotation_z(angle).transform_point(p),
+                p.rotate_z(angle)
+            ));
+        }
+    }
+
+    #[test]
+    fn matrix_multiplication_applies_right_to_left() {
+        let p = vec3(1.0, 1.0, 1.0);
+        let m = Mat4::translation(vec3(10.0, 0.0, 0.0)) * Mat4::scaling(vec3(2.0, 3.0, 4.0));
+        // Scale first (to 2, 3, 4), then move.
+        assert!(close(m.transform_point(p), vec3(12.0, 3.0, 4.0)));
+        assert_eq!(Mat4::IDENTITY * m, m);
+    }
+
+    #[test]
+    fn perspective_depth_is_near_over_distance() {
+        let m = Mat4::perspective(std::f32::consts::FRAC_PI_2, 2.0, 0.1);
+        let [x, y, z, w] = m.transform([4.0, 3.0, 10.0, 1.0]);
+        // The GPU divides everything by w (the distance).
+        assert!((x / w - 0.2).abs() < 1e-6); // 4 / 10, halved by the 2:1 aspect
+        assert!((y / w - 0.3).abs() < 1e-6);
+        assert!((z / w - 0.01).abs() < 1e-6); // near / distance
     }
 }

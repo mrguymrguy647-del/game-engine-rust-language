@@ -13,6 +13,7 @@ use crate::canvas::Canvas;
 use crate::color::Color;
 use crate::input::{Input, Key, MouseButton};
 use crate::math::{Rect, Vec2, vec2};
+use crate::render3d::Renderer;
 use crate::rng::Rng;
 
 /// The longest time step a game will ever see, in seconds.
@@ -50,6 +51,9 @@ pub struct Config {
     pub target_fps: usize,
     /// Show a frames-per-second counter in the corner. F3 toggles it while playing.
     pub show_fps: bool,
+    /// What draws 3D: the graphics card if possible (`Auto`), or always the
+    /// CPU. The `TINY_ENGINE_RENDERER` environment variable overrides this.
+    pub renderer: Renderer,
 }
 
 impl Default for Config {
@@ -61,6 +65,7 @@ impl Default for Config {
             scale: 3,
             target_fps: 60,
             show_fps: false,
+            renderer: Renderer::Auto,
         }
     }
 }
@@ -76,6 +81,7 @@ pub struct Context {
     frame: u64,
     /// Seconds per frame, averaged over recent frames. 0.0 until measured.
     average_frame_time: f32,
+    renderer_name: String,
     width: usize,
     height: usize,
     quit_requested: bool,
@@ -90,6 +96,7 @@ impl Context {
             time: 0.0,
             frame: 0,
             average_frame_time: 0.0,
+            renderer_name: String::new(),
             width,
             height,
             quit_requested: false,
@@ -119,6 +126,13 @@ impl Context {
         } else {
             0.0
         }
+    }
+
+    /// What draws 3D: `"CPU"`, or `"GPU: "` plus the graphics card's name.
+    /// Known from the second frame on, because the GPU starts up when the
+    /// first mesh is drawn.
+    pub fn renderer_name(&self) -> &str {
+        &self.renderer_name
     }
 
     /// Width of the canvas in pixels.
@@ -187,6 +201,7 @@ pub fn run<G: Game>(config: Config, mut game: G) -> Result<(), Box<dyn Error>> {
     window.set_target_fps(config.target_fps);
 
     let mut canvas = Canvas::new(config.width, config.height);
+    canvas.set_renderer(renderer_from_env().unwrap_or(config.renderer));
     let mut ctx = Context::new(config.width, config.height);
     let mut show_fps = config.show_fps;
     let mut last_frame = Instant::now();
@@ -205,6 +220,10 @@ pub fn run<G: Game>(config: Config, mut game: G) -> Result<(), Box<dyn Error>> {
         // 3 + 4. The game's turn.
         game.update(&mut ctx);
         game.draw(&mut canvas);
+        canvas.flush_3d(); // make sure any 3D from the graphics card is in the pixels
+        if ctx.renderer_name != canvas.renderer_name() {
+            ctx.renderer_name = canvas.renderer_name().to_string();
+        }
 
         if ctx.input.was_pressed(Key::F3) {
             show_fps = !show_fps;
@@ -270,6 +289,23 @@ fn window_to_canvas(
         (mouse.0 - offset_x) / scale,
         (mouse.1 - offset_y) / scale,
     ))
+}
+
+/// Reads the `TINY_ENGINE_RENDERER` environment variable, if it's set:
+/// `cpu`, `gpu` or `auto`. It lets you switch renderers without changing code.
+fn renderer_from_env() -> Option<Renderer> {
+    let value = std::env::var("TINY_ENGINE_RENDERER").ok()?;
+    match value.to_lowercase().as_str() {
+        "cpu" => Some(Renderer::Cpu),
+        "gpu" => Some(Renderer::Gpu),
+        "auto" => Some(Renderer::Auto),
+        other => {
+            eprintln!(
+                "tiny_engine: ignoring TINY_ENGINE_RENDERER={other:?} (use cpu, gpu or auto)"
+            );
+            None
+        }
+    }
 }
 
 fn draw_fps(canvas: &mut Canvas, fps: f32) {

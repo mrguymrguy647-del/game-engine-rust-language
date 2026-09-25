@@ -32,6 +32,8 @@
 pub mod canvas;
 pub mod color;
 pub mod engine;
+#[cfg(feature = "gpu")]
+mod gpu;
 pub mod input;
 pub mod math;
 pub mod physics;
@@ -51,6 +53,6 @@ pub mod prelude {
     pub use crate::engine::{Config, Context, Game};
     pub use crate::input::{Input, Key, MouseButton};
     pub use crate::math::{Rect, Vec2, Vec3, vec2, vec3};
-    pub use crate::render3d::{Camera3D, Mesh, Transform};
+    pub use crate::render3d::{Camera3D, Mesh, Renderer, Transform};
     pub use crate::rng::Rng;
 }

@@ -21,17 +21,17 @@ use crate::canvas::Canvas;
 use crate::color::Color;
 use crate::engine::Context;
 use crate::input::{Key, MouseButton};
-use crate::math::{Vec2, Vec3, vec2, vec3};
+use crate::math::{Mat4, Vec2, Vec3, vec2, vec3};
 
 /// Anything closer to the camera than this is cut off. Without it we'd
 /// divide by zero (or by negative numbers, for things behind the camera).
 const NEAR: f32 = 0.05;
 
 /// How bright a triangle facing completely away from the sun is (0 to 1).
-const AMBIENT_LIGHT: f32 = 0.35;
+pub(crate) const AMBIENT_LIGHT: f32 = 0.35;
 
 /// The direction the sunlight comes *from*: above, a little left, a little in front.
-fn sun_direction() -> Vec3 {
+pub(crate) fn sun_direction() -> Vec3 {
     vec3(-0.4, 1.0, -0.6).normalized()
 }
 
@@ -156,6 +156,36 @@ impl Camera3D {
             height / 2.0 - p.y / p.z * focal_length, // minus: screen y points down
         )
     }
+
+    /// [`Camera3D::to_camera_space`] as a matrix: undo the position, then
+    /// the yaw, then the pitch. (Read the multiplication right to left.)
+    pub fn view_matrix(&self) -> Mat4 {
+        Mat4::rotation_x(-self.pitch)
+            * Mat4::rotation_y(-self.yaw)
+            * Mat4::translation(-self.position)
+    }
+
+    /// The perspective projection as a matrix, for a canvas `aspect` times
+    /// as wide as it is tall. It maps the same points to the same pixels as
+    /// the CPU renderer does.
+    pub fn projection_matrix(&self, aspect: f32) -> Mat4 {
+        Mat4::perspective(self.fov, aspect, NEAR)
+    }
+}
+
+/// What draws 3D meshes. Set it with [`Config::renderer`](crate::engine::Config::renderer)
+/// or [`Canvas::set_renderer`], or override it for any game with the
+/// `TINY_ENGINE_RENDERER` environment variable (`cpu`, `gpu` or `auto`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Renderer {
+    /// The graphics card if there is a usable one, otherwise the CPU.
+    #[default]
+    Auto,
+    /// The graphics card. (Still falls back to the CPU, with a message, if
+    /// there isn't one.)
+    Gpu,
+    /// The CPU renderer in this file: slower, but you can read every step.
+    Cpu,
 }
 
 /// Where an object is, how it's turned and how big it is.
@@ -216,6 +246,25 @@ impl Transform {
             .rotate_y(self.rotation.y)
             .rotate_z(self.rotation.z)
             + self.position
+    }
+
+    /// The same as [`Transform::apply`], packed into one matrix: scale, then
+    /// rotate around x, y and z, then move. (Read right to left.)
+    pub fn matrix(&self) -> Mat4 {
+        let mut m = Mat4::scaling(self.scale);
+        // Skipping rotations of zero saves time: most objects only turn one way.
+        if self.rotation.x != 0.0 {
+            m = Mat4::rotation_x(self.rotation.x) * m;
+        }
+        if self.rotation.y != 0.0 {
+            m = Mat4::rotation_y(self.rotation.y) * m;
+        }
+        if self.rotation.z != 0.0 {
+            m = Mat4::rotation_z(self.rotation.z) * m;
+        }
+        // Moving just means filling in the last column.
+        m.columns[3] = [self.position.x, self.position.y, self.position.z, 1.0];
+        m
     }
 }
 
@@ -407,6 +456,12 @@ impl Canvas {
     /// (This `impl Canvas` block lives in `render3d.rs`, not `canvas.rs`: Rust
     /// lets a type's methods be spread over several files in the same crate.)
     pub fn draw_mesh(&mut self, mesh: &Mesh, transform: &Transform, camera: &Camera3D) {
+        #[cfg(feature = "gpu")]
+        if self.draw_mesh_on_gpu(mesh, transform, camera) {
+            return; // the graphics card will draw it (see gpu.rs)
+        }
+
+        // Otherwise, draw it right here on the CPU.
         let world: Vec<Vec3> = mesh.vertices.iter().map(|&v| transform.apply(v)).collect();
         let sun = sun_direction();
 
@@ -538,6 +593,35 @@ mod tests {
             .scaled(vec3(2.0, 1.0, 1.0));
         // (0.5, 0, 0) -> scaled to (1, 0, 0) -> turned right to (0, 0, -1) -> moved.
         assert!(t.apply(vec3(0.5, 0.0, 0.0)).distance(vec3(10.0, 0.0, -1.0)) < 1e-5);
+    }
+
+    #[test]
+    fn matrices_match_the_cpu_math() {
+        let transform = Transform::at(vec3(3.0, -1.0, 7.0))
+            .rotated(vec3(0.4, -1.1, 0.25))
+            .scaled(vec3(2.0, 0.5, 1.5));
+        let camera = Camera3D::looking_at(vec3(-4.0, 3.0, -6.0), vec3(1.0, 0.0, 2.0));
+        let canvas = Canvas::new(320, 240);
+        let view_projection = camera.projection_matrix(320.0 / 240.0) * camera.view_matrix();
+
+        for point in [vec3(0.5, 0.5, 0.5), vec3(-0.5, 0.2, -0.3), Vec3::ZERO] {
+            let world = transform.apply(point);
+            assert!(transform.matrix().transform_point(point).distance(world) < 1e-4);
+            let in_camera = camera.to_camera_space(world);
+            assert!(
+                camera
+                    .view_matrix()
+                    .transform_point(world)
+                    .distance(in_camera)
+                    < 1e-4
+            );
+
+            // Project with the matrix, then turn the GPU's -1..1 range into pixels.
+            let [x, y, _, w] = view_projection.transform([world.x, world.y, world.z, 1.0]);
+            let pixel = vec2((x / w + 1.0) / 2.0 * 320.0, (1.0 - y / w) / 2.0 * 240.0);
+            let expected = camera.world_to_screen(world, &canvas).unwrap();
+            assert!(pixel.distance(expected) < 0.01, "{pixel:?} vs {expected:?}");
+        }
     }
 
     #[test]
