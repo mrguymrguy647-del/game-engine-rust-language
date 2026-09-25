@@ -1,5 +1,8 @@
-//! Small math types every 2D game needs: [`Vec2`] and [`Rect`].
+//! Vector math: [`Vec2`] and [`Rect`] for 2D, [`Vec3`] for 3D, and the
+//! [`Vector`] trait that lets the same code (like the physics engine) work
+//! with both.
 
+use std::fmt::Debug;
 use std::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
 
 /// A 2D vector. Used for positions, velocities, directions and sizes.
@@ -42,6 +45,12 @@ impl Vec2 {
     /// The distance between two points.
     pub fn distance(self, other: Vec2) -> f32 {
         (other - self).length()
+    }
+
+    /// The dot product: `x1 * x2 + y1 * y2`. Positive when the vectors point
+    /// roughly the same way, zero when they are at right angles.
+    pub fn dot(self, other: Vec2) -> f32 {
+        self.x * other.x + self.y * other.y
     }
 }
 
@@ -151,6 +160,364 @@ impl Rect {
     }
 }
 
+/// A 3D vector.
+///
+/// In 3D the engine uses these directions: `x` is right, `y` is **up**
+/// and `z` is forward (into the screen). Note that `y` points the other way
+/// from 2D screen coordinates, where it points down.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Vec3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+/// Shorthand for [`Vec3::new`]: `vec3(1.0, 2.0, 3.0)`.
+pub const fn vec3(x: f32, y: f32, z: f32) -> Vec3 {
+    Vec3 { x, y, z }
+}
+
+impl Vec3 {
+    pub const ZERO: Vec3 = vec3(0.0, 0.0, 0.0);
+    pub const ONE: Vec3 = vec3(1.0, 1.0, 1.0);
+    pub const UP: Vec3 = vec3(0.0, 1.0, 0.0);
+
+    pub const fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+
+    pub fn length(self) -> f32 {
+        self.dot(self).sqrt()
+    }
+
+    /// A vector pointing the same way with length 1 (or zero for the zero vector).
+    pub fn normalized(self) -> Self {
+        let len = self.length();
+        if len == 0.0 {
+            Self::ZERO
+        } else {
+            self * (1.0 / len)
+        }
+    }
+
+    pub fn distance(self, other: Vec3) -> f32 {
+        (other - self).length()
+    }
+
+    pub fn dot(self, other: Vec3) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    /// The cross product: a vector at right angles to both inputs. The 3D
+    /// renderer uses it to find which way a triangle is facing.
+    pub fn cross(self, other: Vec3) -> Vec3 {
+        vec3(
+            self.y * other.z - self.z * other.y,
+            self.z * other.x - self.x * other.z,
+            self.x * other.y - self.y * other.x,
+        )
+    }
+
+    /// Rotates around the x axis (tilting forward/back). A positive angle
+    /// turns forward (+z) towards up (+y).
+    pub fn rotate_x(self, angle: f32) -> Vec3 {
+        let (sin, cos) = angle.sin_cos();
+        vec3(
+            self.x,
+            self.y * cos + self.z * sin,
+            -self.y * sin + self.z * cos,
+        )
+    }
+
+    /// Rotates around the y axis (turning left/right). A positive angle
+    /// turns forward (+z) towards right (+x).
+    pub fn rotate_y(self, angle: f32) -> Vec3 {
+        let (sin, cos) = angle.sin_cos();
+        vec3(
+            self.x * cos + self.z * sin,
+            self.y,
+            -self.x * sin + self.z * cos,
+        )
+    }
+
+    /// Rotates around the z axis (rolling). A positive angle turns right (+x)
+    /// towards up (+y).
+    pub fn rotate_z(self, angle: f32) -> Vec3 {
+        let (sin, cos) = angle.sin_cos();
+        vec3(
+            self.x * cos - self.y * sin,
+            self.x * sin + self.y * cos,
+            self.z,
+        )
+    }
+}
+
+impl Add for Vec3 {
+    type Output = Vec3;
+    fn add(self, rhs: Vec3) -> Vec3 {
+        vec3(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
+    }
+}
+
+impl Sub for Vec3 {
+    type Output = Vec3;
+    fn sub(self, rhs: Vec3) -> Vec3 {
+        vec3(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
+    }
+}
+
+impl Mul<f32> for Vec3 {
+    type Output = Vec3;
+    fn mul(self, rhs: f32) -> Vec3 {
+        vec3(self.x * rhs, self.y * rhs, self.z * rhs)
+    }
+}
+
+impl Neg for Vec3 {
+    type Output = Vec3;
+    fn neg(self) -> Vec3 {
+        vec3(-self.x, -self.y, -self.z)
+    }
+}
+
+impl AddAssign for Vec3 {
+    fn add_assign(&mut self, rhs: Vec3) {
+        self.x += rhs.x;
+        self.y += rhs.y;
+        self.z += rhs.z;
+    }
+}
+
+impl SubAssign for Vec3 {
+    fn sub_assign(&mut self, rhs: Vec3) {
+        self.x -= rhs.x;
+        self.y -= rhs.y;
+        self.z -= rhs.z;
+    }
+}
+
+/// Anything that behaves like a list of numbers you can add, subtract and
+/// scale: [`Vec2`] and [`Vec3`].
+///
+/// Code written for "any `V: Vector`" works in 2D *and* 3D. The physics
+/// engine is written this way, so one implementation handles both.
+///
+/// The long list after the `:` are *supertraits*: to be a `Vector`, a type
+/// must also support `+`, `-`, `* f32` and so on.
+pub trait Vector:
+    Copy
+    + Debug
+    + Default
+    + PartialEq
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<f32, Output = Self>
+    + Neg<Output = Self>
+    + AddAssign
+    + SubAssign
+{
+    /// How many numbers the vector holds: 2 for [`Vec2`], 3 for [`Vec3`].
+    const DIMENSIONS: usize;
+
+    /// One component: axis 0 is x, 1 is y, 2 is z.
+    fn get(self, axis: usize) -> f32;
+
+    /// A copy of this vector with one component replaced.
+    fn with(self, axis: usize, value: f32) -> Self;
+
+    fn dot(self, other: Self) -> f32;
+
+    /// A vector of length 1 along one axis, like `(0, 1)` or `(0, 0, 1)`.
+    ///
+    /// This one has a *default implementation*, so `Vec2` and `Vec3` get it for free.
+    fn unit(axis: usize) -> Self {
+        Self::default().with(axis, 1.0)
+    }
+}
+
+impl Vector for Vec2 {
+    const DIMENSIONS: usize = 2;
+
+    fn get(self, axis: usize) -> f32 {
+        match axis {
+            0 => self.x,
+            1 => self.y,
+            _ => panic!("Vec2 has no axis {axis}"),
+        }
+    }
+
+    fn with(mut self, axis: usize, value: f32) -> Self {
+        match axis {
+            0 => self.x = value,
+            1 => self.y = value,
+            _ => panic!("Vec2 has no axis {axis}"),
+        }
+        self
+    }
+
+    fn dot(self, other: Self) -> f32 {
+        Vec2::dot(self, other)
+    }
+}
+
+impl Vector for Vec3 {
+    const DIMENSIONS: usize = 3;
+
+    fn get(self, axis: usize) -> f32 {
+        match axis {
+            0 => self.x,
+            1 => self.y,
+            2 => self.z,
+            _ => panic!("Vec3 has no axis {axis}"),
+        }
+    }
+
+    fn with(mut self, axis: usize, value: f32) -> Self {
+        match axis {
+            0 => self.x = value,
+            1 => self.y = value,
+            2 => self.z = value,
+            _ => panic!("Vec3 has no axis {axis}"),
+        }
+        self
+    }
+
+    fn dot(self, other: Self) -> f32 {
+        Vec3::dot(self, other)
+    }
+}
+
+/// A 4x4 matrix: one package holding a whole chain of moves, rotations,
+/// scalings, and even the perspective projection.
+///
+/// The GPU renderer uses these: instead of rotating and moving every
+/// corner step by step like the CPU renderer, it multiplies each corner by
+/// one matrix. Multiplying two matrices gives a matrix that does both jobs,
+/// so `translation * rotation * scaling` scales first, then rotates, then
+/// moves (read right to left).
+///
+/// The numbers are stored column by column, the layout GPUs expect:
+/// `columns[c][r]` is row `r` of column `c`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mat4 {
+    pub columns: [[f32; 4]; 4],
+}
+
+impl Mat4 {
+    /// The "do nothing" matrix.
+    pub const IDENTITY: Mat4 = Mat4 {
+        columns: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    };
+
+    /// Moves points by `offset`.
+    pub fn translation(offset: Vec3) -> Mat4 {
+        let mut m = Mat4::IDENTITY;
+        m.columns[3] = [offset.x, offset.y, offset.z, 1.0];
+        m
+    }
+
+    /// Stretches points along each axis.
+    pub fn scaling(scale: Vec3) -> Mat4 {
+        let mut m = Mat4::IDENTITY;
+        m.columns[0][0] = scale.x;
+        m.columns[1][1] = scale.y;
+        m.columns[2][2] = scale.z;
+        m
+    }
+
+    /// The same rotation as [`Vec3::rotate_x`].
+    pub fn rotation_x(angle: f32) -> Mat4 {
+        let (sin, cos) = angle.sin_cos();
+        Mat4 {
+            columns: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, cos, -sin, 0.0],
+                [0.0, sin, cos, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// The same rotation as [`Vec3::rotate_y`].
+    pub fn rotation_y(angle: f32) -> Mat4 {
+        let (sin, cos) = angle.sin_cos();
+        Mat4 {
+            columns: [
+                [cos, 0.0, -sin, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [sin, 0.0, cos, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// The same rotation as [`Vec3::rotate_z`].
+    pub fn rotation_z(angle: f32) -> Mat4 {
+        let (sin, cos) = angle.sin_cos();
+        Mat4 {
+            columns: [
+                [cos, sin, 0.0, 0.0],
+                [-sin, cos, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// A perspective projection for a camera looking along +z, in the form
+    /// the GPU wants: x and y from -1 to 1 across the screen, and a *depth*
+    /// that is 1.0 at `near` and shrinks towards 0.0 far away.
+    ///
+    /// That depth is `near / distance`: the same "bigger means closer" idea
+    /// as the CPU renderer's `1 / distance` depth buffer. (GPU programmers
+    /// call it *reversed Z*: it keeps far-away depths precise.)
+    pub fn perspective(fov_y: f32, aspect: f32, near: f32) -> Mat4 {
+        let y = 1.0 / (fov_y / 2.0).tan();
+        let x = y / aspect;
+        Mat4 {
+            columns: [
+                [x, 0.0, 0.0, 0.0],
+                [0.0, y, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0], // w = z: the GPU divides by the distance
+                [0.0, 0.0, near, 0.0],
+            ],
+        }
+    }
+
+    /// Multiplies a 4-number column `[x, y, z, w]` by this matrix.
+    ///
+    /// Each result row adds up "column times amount" over the four columns.
+    /// (Written out in full because the GPU renderer does this thousands of
+    /// times per frame; the compiler turns it into very fast code.)
+    pub fn transform(&self, v: [f32; 4]) -> [f32; 4] {
+        let c = &self.columns;
+        [0, 1, 2, 3]
+            .map(|row| c[0][row] * v[0] + c[1][row] * v[1] + c[2][row] * v[2] + c[3][row] * v[3])
+    }
+
+    /// Transforms a point (a position, so moves apply to it).
+    pub fn transform_point(&self, p: Vec3) -> Vec3 {
+        let [x, y, z, _] = self.transform([p.x, p.y, p.z, 1.0]);
+        vec3(x, y, z)
+    }
+}
+
+impl Mul for Mat4 {
+    type Output = Mat4;
+
+    /// `a * b` does `b` first, then `a`.
+    fn mul(self, rhs: Mat4) -> Mat4 {
+        Mat4 {
+            columns: rhs.columns.map(|column| self.transform(column)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +561,90 @@ mod tests {
         assert_eq!(r.center(), vec2(10.0, 10.0));
         assert!(r.contains(vec2(8.0, 7.0)));
         assert!(!r.contains(vec2(12.0, 10.0)));
+    }
+
+    /// Floats are rarely exactly equal after trigonometry, so compare with a tolerance.
+    fn close(a: Vec3, b: Vec3) -> bool {
+        a.distance(b) < 1e-5
+    }
+
+    #[test]
+    fn vec3_arithmetic() {
+        let a = vec3(1.0, 2.0, 3.0);
+        assert_eq!(a + Vec3::ONE, vec3(2.0, 3.0, 4.0));
+        assert_eq!(a - Vec3::ONE, vec3(0.0, 1.0, 2.0));
+        assert_eq!(a * 2.0, vec3(2.0, 4.0, 6.0));
+        assert_eq!(-a, vec3(-1.0, -2.0, -3.0));
+        assert_eq!(a.dot(vec3(1.0, 0.0, 1.0)), 4.0);
+        assert_eq!(vec3(0.0, 3.0, 4.0).length(), 5.0);
+        assert_eq!(vec3(0.0, 0.0, 9.0).normalized(), vec3(0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn cross_product_is_perpendicular() {
+        let x = vec3(1.0, 0.0, 0.0);
+        let y = vec3(0.0, 1.0, 0.0);
+        assert_eq!(x.cross(y), vec3(0.0, 0.0, 1.0));
+        let c = vec3(1.0, 2.0, 3.0).cross(vec3(-4.0, 0.5, 2.0));
+        assert!(c.dot(vec3(1.0, 2.0, 3.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rotations_turn_the_documented_way() {
+        let forward = vec3(0.0, 0.0, 1.0);
+        let quarter = std::f32::consts::FRAC_PI_2;
+        assert!(close(forward.rotate_y(quarter), vec3(1.0, 0.0, 0.0))); // turn right
+        assert!(close(forward.rotate_x(quarter), vec3(0.0, 1.0, 0.0))); // tilt up
+        assert!(close(vec3(1.0, 0.0, 0.0).rotate_z(quarter), Vec3::UP));
+        // Rotating back undoes a rotation.
+        let v = vec3(1.0, 2.0, 3.0);
+        assert!(close(v.rotate_y(0.7).rotate_y(-0.7), v));
+    }
+
+    #[test]
+    fn vector_trait_works_for_both_sizes() {
+        assert_eq!(Vec2::unit(1), vec2(0.0, 1.0));
+        assert_eq!(Vec3::unit(2), vec3(0.0, 0.0, 1.0));
+        assert_eq!(vec3(1.0, 2.0, 3.0).with(1, 9.0), vec3(1.0, 9.0, 3.0));
+        assert_eq!(vec2(4.0, 5.0).get(0), 4.0);
+        assert_eq!(<Vec3 as Vector>::DIMENSIONS, 3);
+    }
+
+    #[test]
+    fn matrix_rotations_match_vector_rotations() {
+        let p = vec3(1.0, -2.0, 3.0);
+        for angle in [0.3, -1.2, 2.5] {
+            assert!(close(
+                Mat4::rotation_x(angle).transform_point(p),
+                p.rotate_x(angle)
+            ));
+            assert!(close(
+                Mat4::rotation_y(angle).transform_point(p),
+                p.rotate_y(angle)
+            ));
+            assert!(close(
+                Mat4::rotation_z(angle).transform_point(p),
+                p.rotate_z(angle)
+            ));
+        }
+    }
+
+    #[test]
+    fn matrix_multiplication_applies_right_to_left() {
+        let p = vec3(1.0, 1.0, 1.0);
+        let m = Mat4::translation(vec3(10.0, 0.0, 0.0)) * Mat4::scaling(vec3(2.0, 3.0, 4.0));
+        // Scale first (to 2, 3, 4), then move.
+        assert!(close(m.transform_point(p), vec3(12.0, 3.0, 4.0)));
+        assert_eq!(Mat4::IDENTITY * m, m);
+    }
+
+    #[test]
+    fn perspective_depth_is_near_over_distance() {
+        let m = Mat4::perspective(std::f32::consts::FRAC_PI_2, 2.0, 0.1);
+        let [x, y, z, w] = m.transform([4.0, 3.0, 10.0, 1.0]);
+        // The GPU divides everything by w (the distance).
+        assert!((x / w - 0.2).abs() < 1e-6); // 4 / 10, halved by the 2:1 aspect
+        assert!((y / w - 0.3).abs() < 1e-6);
+        assert!((z / w - 0.01).abs() < 1e-6); // near / distance
     }
 }

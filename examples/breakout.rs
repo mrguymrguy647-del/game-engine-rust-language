@@ -1,4 +1,4 @@
-//! Breakout: a complete little game built with tiny_engine.
+//! Breakout: a complete little game built with duckforge.
 //!
 //! Run it with:   cargo run --release --example breakout
 //! Controls:      Left/Right or A/D move the paddle, Space launches the ball,
@@ -6,7 +6,7 @@
 
 use std::f32::consts::TAU;
 
-use tiny_engine::prelude::*;
+use duckforge::prelude::*;
 
 // ---- Tuning knobs. Change these and see what happens! ----
 
@@ -338,10 +338,10 @@ impl Game for Breakout {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config {
-        title: String::from("Breakout - tiny_engine"),
+        title: String::from("Breakout - duckforge"),
         width: WIDTH as usize,
         height: HEIGHT as usize,
         ..Config::default()
     };
-    tiny_engine::run(config, Breakout::new())
+    duckforge::run(config, Breakout::new())
 }

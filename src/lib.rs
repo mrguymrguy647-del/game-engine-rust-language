@@ -1,4 +1,4 @@
-//! # tiny_engine
+//! # duckforge
 //!
 //! A deliberately small 2D game engine, written for learning Rust.
 //!
@@ -7,7 +7,7 @@
 //! `update` and `draw` methods once per frame:
 //!
 //! ```no_run
-//! use tiny_engine::prelude::*;
+//! use duckforge::prelude::*;
 //!
 //! struct MyGame {
 //!     x: f32,
@@ -25,15 +25,19 @@
 //! }
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     tiny_engine::run(Config::default(), MyGame { x: 0.0 })
+//!     duckforge::run(Config::default(), MyGame { x: 0.0 })
 //! }
 //! ```
 
 pub mod canvas;
 pub mod color;
 pub mod engine;
+#[cfg(feature = "gpu")]
+mod gpu;
 pub mod input;
 pub mod math;
+pub mod physics;
+pub mod render3d;
 pub mod rng;
 
 // Not `pub`: the font is an internal detail of `Canvas::draw_text`.
@@ -42,12 +46,13 @@ mod font;
 pub use engine::run;
 
 /// Everything a game usually needs, importable in one line:
-/// `use tiny_engine::prelude::*;`
+/// `use duckforge::prelude::*;`
 pub mod prelude {
     pub use crate::canvas::Canvas;
     pub use crate::color::Color;
     pub use crate::engine::{Config, Context, Game};
-    pub use crate::input::{Input, Key};
-    pub use crate::math::{Rect, Vec2, vec2};
+    pub use crate::input::{Input, Key, MouseButton};
+    pub use crate::math::{Rect, Vec2, Vec3, vec2, vec3};
+    pub use crate::render3d::{Camera3D, Mesh, Renderer, Transform};
     pub use crate::rng::Rng;
 }
