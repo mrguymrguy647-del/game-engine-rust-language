@@ -1,0 +1,311 @@
+//! The canvas: a block of pixels in memory that games draw into.
+//!
+//! This is a *software renderer*: every shape is drawn by our own code
+//! writing numbers into a `Vec<u32>`. Once per frame the engine hands the
+//! finished pixels to the window to be shown.
+
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::path::Path;
+
+use crate::color::Color;
+use crate::font;
+use crate::math::{Rect, Vec2, vec2};
+
+/// A 2D grid of pixels.
+///
+/// Pixels are stored row by row in one flat `Vec`, so the pixel at
+/// `(x, y)` lives at index `y * width + x`.
+pub struct Canvas {
+    width: usize,
+    height: usize,
+    pixels: Vec<u32>,
+}
+
+impl Canvas {
+    /// Creates a black canvas.
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![0; width * height],
+        }
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// The raw pixels, row by row, each in `0x00RRGGBB` format.
+    pub fn pixels(&self) -> &[u32] {
+        &self.pixels
+    }
+
+    /// Fills the whole canvas with one color.
+    pub fn clear(&mut self, color: Color) {
+        self.pixels.fill(color.to_u32());
+    }
+
+    /// Converts `(x, y)` into an index into `pixels`, or `None` if it is off-canvas.
+    fn index(&self, x: i32, y: i32) -> Option<usize> {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return None;
+        }
+        Some(y as usize * self.width + x as usize)
+    }
+
+    /// Sets one pixel. Pixels outside the canvas are silently ignored.
+    pub fn set_pixel(&mut self, x: i32, y: i32, color: Color) {
+        if let Some(i) = self.index(x, y) {
+            self.pixels[i] = color.to_u32();
+        }
+    }
+
+    /// Reads one pixel, or `None` if `(x, y)` is outside the canvas.
+    pub fn get_pixel(&self, x: i32, y: i32) -> Option<Color> {
+        self.index(x, y).map(|i| Color::from_hex(self.pixels[i]))
+    }
+
+    /// Fills a rectangle. Parts outside the canvas are clipped away.
+    pub fn fill_rect(&mut self, rect: Rect, color: Color) {
+        // Round to whole pixels, then clamp to the canvas so we never index out of bounds.
+        let clamp_x = |v: f32| (v.round() as i32).clamp(0, self.width as i32) as usize;
+        let clamp_y = |v: f32| (v.round() as i32).clamp(0, self.height as i32) as usize;
+        let (x0, x1) = (clamp_x(rect.left()), clamp_x(rect.right()));
+        let (y0, y1) = (clamp_y(rect.top()), clamp_y(rect.bottom()));
+        if x0 >= x1 || y0 >= y1 {
+            return; // nothing visible
+        }
+
+        let c = color.to_u32();
+        for y in y0..y1 {
+            let row = y * self.width;
+            // Filling a whole slice at once is much faster than one set_pixel call per pixel.
+            self.pixels[row + x0..row + x1].fill(c);
+        }
+    }
+
+    /// Draws a 1-pixel outline of a rectangle.
+    pub fn draw_rect(&mut self, rect: Rect, color: Color) {
+        let Rect { x, y, w, h } = rect;
+        self.fill_rect(Rect::new(x, y, w, 1.0), color); // top
+        self.fill_rect(Rect::new(x, y + h - 1.0, w, 1.0), color); // bottom
+        self.fill_rect(Rect::new(x, y, 1.0, h), color); // left
+        self.fill_rect(Rect::new(x + w - 1.0, y, 1.0, h), color); // right
+    }
+
+    /// Fills a circle.
+    pub fn fill_circle(&mut self, center: Vec2, radius: f32, color: Color) {
+        // Only visit the pixels in the circle's bounding box that are on the canvas.
+        let x0 = ((center.x - radius).floor() as i32).max(0);
+        let x1 = ((center.x + radius).ceil() as i32).min(self.width as i32);
+        let y0 = ((center.y - radius).floor() as i32).max(0);
+        let y1 = ((center.y + radius).ceil() as i32).min(self.height as i32);
+
+        let r2 = radius * radius;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                // Is the *center* of this pixel inside the circle?
+                let dx = x as f32 + 0.5 - center.x;
+                let dy = y as f32 + 0.5 - center.y;
+                if dx * dx + dy * dy <= r2 {
+                    self.set_pixel(x, y, color);
+                }
+            }
+        }
+    }
+
+    /// Draws a 1-pixel line using Bresenham's algorithm, which steps
+    /// pixel by pixel using only integer math.
+    pub fn draw_line(&mut self, from: Vec2, to: Vec2, color: Color) {
+        let (mut x, mut y) = (from.x.round() as i32, from.y.round() as i32);
+        let (x_end, y_end) = (to.x.round() as i32, to.y.round() as i32);
+
+        let dx = (x_end - x).abs();
+        let dy = -(y_end - y).abs();
+        let step_x = if x < x_end { 1 } else { -1 };
+        let step_y = if y < y_end { 1 } else { -1 };
+        let mut error = dx + dy;
+
+        loop {
+            self.set_pixel(x, y, color);
+            if x == x_end && y == y_end {
+                break;
+            }
+            let e2 = 2 * error;
+            if e2 >= dy {
+                error += dy;
+                x += step_x;
+            }
+            if e2 <= dx {
+                error += dx;
+                y += step_y;
+            }
+        }
+    }
+
+    /// Draws text with the built-in 3x5 pixel font. `pos` is the top-left
+    /// corner; `scale` makes each font pixel a `scale` x `scale` square.
+    /// A `'\n'` starts a new line.
+    pub fn draw_text(&mut self, text: &str, pos: Vec2, scale: u32, color: Color) {
+        let s = scale as f32;
+        let mut cursor = pos;
+
+        for c in text.chars() {
+            if c == '\n' {
+                cursor.x = pos.x;
+                cursor.y += font::LINE_HEIGHT as f32 * s;
+                continue;
+            }
+
+            let glyph = font::glyph(c);
+            for row in 0..font::GLYPH_HEIGHT {
+                for col in 0..font::GLYPH_WIDTH {
+                    if font::is_lit(&glyph, col, row) {
+                        let x = cursor.x + col as f32 * s;
+                        let y = cursor.y + row as f32 * s;
+                        self.fill_rect(Rect::new(x, y, s, s), color);
+                    }
+                }
+            }
+            cursor.x += font::ADVANCE as f32 * s;
+        }
+    }
+
+    /// Draws text centered horizontally on the canvas, with its top at `y`.
+    /// Each line of multi-line text is centered on its own.
+    pub fn draw_text_centered(&mut self, text: &str, y: f32, scale: u32, color: Color) {
+        let line_height = (font::LINE_HEIGHT as u32 * scale) as f32;
+        for (i, line) in text.lines().enumerate() {
+            let x = (self.width as f32 - Canvas::text_width(line, scale)) / 2.0;
+            self.draw_text(line, vec2(x, y + i as f32 * line_height), scale, color);
+        }
+    }
+
+    /// How many pixels wide `text` is when drawn at `scale` (its widest line).
+    pub fn text_width(text: &str, scale: u32) -> f32 {
+        let longest = text
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        if longest == 0 {
+            return 0.0;
+        }
+        // Every character takes ADVANCE pixels, but there is no gap after the last one.
+        ((longest * font::ADVANCE - 1) as u32 * scale) as f32
+    }
+
+    /// Saves the canvas as a `.bmp` image, a format every image viewer can open.
+    pub fn save_bmp(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        let file = File::create(path)?;
+        let mut out = BufWriter::new(file);
+        self.write_bmp(&mut out)?;
+        out.flush()
+    }
+
+    /// Writes a 32-bit BMP: a 54-byte header followed by the raw pixels.
+    fn write_bmp(&self, out: &mut impl Write) -> io::Result<()> {
+        const HEADER_SIZE: u32 = 14 + 40;
+        let image_size = (self.width * self.height * 4) as u32;
+
+        // File header.
+        out.write_all(b"BM")?;
+        out.write_all(&(HEADER_SIZE + image_size).to_le_bytes())?; // file size
+        out.write_all(&0u32.to_le_bytes())?; // reserved
+        out.write_all(&HEADER_SIZE.to_le_bytes())?; // where the pixels start
+
+        // Info header (the "BITMAPINFOHEADER" layout).
+        out.write_all(&40u32.to_le_bytes())?; // size of this header
+        out.write_all(&(self.width as i32).to_le_bytes())?;
+        out.write_all(&(-(self.height as i32)).to_le_bytes())?; // negative = rows go top to bottom
+        out.write_all(&1u16.to_le_bytes())?; // color planes (always 1)
+        out.write_all(&32u16.to_le_bytes())?; // bits per pixel
+        out.write_all(&0u32.to_le_bytes())?; // no compression
+        out.write_all(&image_size.to_le_bytes())?;
+        out.write_all(&2835u32.to_le_bytes())?; // horizontal resolution (72 DPI)
+        out.write_all(&2835u32.to_le_bytes())?; // vertical resolution
+        out.write_all(&0u32.to_le_bytes())?; // colors in palette (none)
+        out.write_all(&0u32.to_le_bytes())?; // "important" colors (all)
+
+        // A pixel 0x00RRGGBB stored little-endian is the bytes B, G, R, 0,
+        // which is exactly BMP's order. We set the last byte to 0xFF (opaque).
+        for &pixel in &self.pixels {
+            out.write_all(&(pixel | 0xFF00_0000).to_le_bytes())?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_and_get_pixel() {
+        let (width, x, y) = (4, 2, 1);
+        let mut canvas = Canvas::new(width, 3);
+        canvas.set_pixel(x as i32, y as i32, Color::RED);
+        assert_eq!(canvas.get_pixel(2, 1), Some(Color::RED));
+        assert_eq!(canvas.pixels()[y * width + x], Color::RED.to_u32());
+        assert_eq!(canvas.get_pixel(0, 0), Some(Color::BLACK));
+        assert_eq!(canvas.get_pixel(4, 0), None);
+        assert_eq!(canvas.get_pixel(-1, 0), None);
+    }
+
+    #[test]
+    fn drawing_off_canvas_does_not_panic() {
+        let mut canvas = Canvas::new(10, 10);
+        canvas.set_pixel(-5, 100, Color::WHITE);
+        canvas.fill_rect(Rect::new(-50.0, -50.0, 20.0, 20.0), Color::WHITE);
+        canvas.fill_rect(Rect::new(5.0, 5.0, -3.0, 2.0), Color::WHITE);
+        canvas.fill_circle(vec2(-100.0, 5.0), 3.0, Color::WHITE);
+        canvas.draw_line(vec2(-20.0, -20.0), vec2(30.0, 30.0), Color::WHITE);
+        canvas.draw_text("OFF SCREEN", vec2(8.0, 8.0), 4, Color::WHITE);
+    }
+
+    #[test]
+    fn fill_rect_is_clipped() {
+        let mut canvas = Canvas::new(10, 10);
+        canvas.fill_rect(Rect::new(-5.0, -5.0, 7.0, 7.0), Color::GREEN);
+        assert_eq!(canvas.get_pixel(0, 0), Some(Color::GREEN));
+        assert_eq!(canvas.get_pixel(1, 1), Some(Color::GREEN));
+        assert_eq!(canvas.get_pixel(2, 2), Some(Color::BLACK));
+    }
+
+    #[test]
+    fn circle_and_line() {
+        let mut canvas = Canvas::new(20, 20);
+        canvas.fill_circle(vec2(10.0, 10.0), 4.0, Color::BLUE);
+        assert_eq!(canvas.get_pixel(10, 10), Some(Color::BLUE));
+        assert_eq!(canvas.get_pixel(0, 0), Some(Color::BLACK));
+
+        canvas.draw_line(vec2(0.0, 19.0), vec2(19.0, 19.0), Color::RED);
+        assert!((0..20).all(|x| canvas.get_pixel(x, 19) == Some(Color::RED)));
+    }
+
+    #[test]
+    fn text_width_matches_font() {
+        assert_eq!(Canvas::text_width("", 1), 0.0);
+        assert_eq!(Canvas::text_width("A", 1), 3.0);
+        assert_eq!(Canvas::text_width("AB", 1), 7.0);
+        assert_eq!(Canvas::text_width("AB", 2), 14.0);
+        assert_eq!(Canvas::text_width("A\nABC", 1), 11.0);
+    }
+
+    #[test]
+    fn bmp_has_header_and_pixels() {
+        let mut canvas = Canvas::new(3, 2);
+        canvas.set_pixel(0, 0, Color::rgb(1, 2, 3));
+        let mut bytes: Vec<u8> = Vec::new();
+        canvas.write_bmp(&mut bytes).unwrap();
+
+        assert_eq!(bytes.len(), 54 + 3 * 2 * 4);
+        assert_eq!(&bytes[0..2], b"BM");
+        assert_eq!(&bytes[54..58], &[3, 2, 1, 0xFF]); // blue, green, red, alpha
+    }
+}
