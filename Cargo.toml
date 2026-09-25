@@ -1,0 +1,9 @@
+[package]
+name = "tiny_engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A small 2D game engine, written for learning Rust"
+
+[dependencies]
+minifb = "0.28"
